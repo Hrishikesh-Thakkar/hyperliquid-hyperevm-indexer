@@ -1,5 +1,6 @@
 import type { UserNonFundingLedgerUpdatesResponse } from '@nktkas/hyperliquid';
 import { infoClient } from './hl-client';
+import { getSystemAddress } from './token-cache';
 
 // ---------------------------------------------------------------------------
 // Derived types from the SDK response
@@ -10,12 +11,21 @@ type LedgerEntry = UserNonFundingLedgerUpdatesResponse[number];
 
 /**
  * The `send` delta variant from userNonFundingLedgerUpdates.
- * This is emitted when a user executes a sendAsset action.
+ * Emitted when a user executes a sendAsset action (sourceDex/destinationDex identify bridge).
  */
 type SendDelta = Extract<LedgerEntry['delta'], { type: 'send' }>;
 
-/** A ledger entry narrowed to the `send` delta type */
-export type SendAssetEntry = LedgerEntry & { delta: SendDelta };
+/**
+ * The `spotTransfer` delta variant (e.g. USDC bridge).
+ * Has user, destination, token, amount, etc.; no sourceDex/destinationDex.
+ */
+type SpotTransferDelta = Extract<LedgerEntry['delta'], { type: 'spotTransfer' }>;
+
+/** Union of delta types that represent a bridge transfer (HL → HyperEVM). */
+type BridgeDelta = SendDelta | SpotTransferDelta;
+
+/** A ledger entry narrowed to a bridge-capable delta (send or spotTransfer). */
+export type SendAssetEntry = LedgerEntry & { delta: BridgeDelta };
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -44,15 +54,20 @@ export async function getBridgeTransfers(
 }
 
 /**
- * Type-guard: narrows a ledger entry to a spot→spot sendAsset bridge transfer.
+ * Type-guard: narrows a ledger entry to a bridge transfer (HL → HyperEVM).
  *
- * Conditions:
- *   - delta.type === 'send'
- *   - delta.sourceDex === 'spot' (originating from Hyperliquid Spot)
- *   - delta.destinationDex === 'spot' (landing on HyperEVM)
+ * Accepts:
+ *   - delta.type === 'send' with sourceDex === 'spot' and destinationDex === 'spot'
+ *   - delta.type === 'spotTransfer' with token === 'USDC' (USDC bridge only)
  */
 export function isBridgeSend(entry: LedgerEntry): entry is SendAssetEntry {
-  const d = entry.delta as Partial<SendDelta>;
+  const d = entry.delta as {
+    type?: string;
+    token?: string;
+    sourceDex?: string;
+    destinationDex?: string;
+  };
+  if (d.type === 'spotTransfer') return d.token === 'USDC';
   return (
     d.type === 'send' &&
     d.sourceDex === 'spot' &&

@@ -10,8 +10,13 @@ const HYPE_SYMBOL = 'HYPE';
 /** Symbol used to identify USDC as the USDC token on HyperEVM */
 const USDC_SYMBOL = 'USDC';
 
-/** USDC uses 6 decimals on HyperEVM (HL may send 8-decimal amounts). */
-const USDC_EVM_DECIMALS = 6;
+/**
+ * Returns the number of fractional digits in a decimal string.
+ */
+function countDecimals(value: string): number {
+  const idx = value.indexOf('.');
+  return idx === -1 ? 0 : value.length - idx - 1;
+}
 
 /**
  * Truncates a decimal string to at most `decimals` fractional digits (no rounding).
@@ -63,15 +68,16 @@ export async function runMatcher(): Promise<void> {
 }
 
 async function matchTransfer(record: DocumentType<TransferRecord>): Promise<void> {
-  // Convert the human-readable HL amount to a bigint for exact EVM comparison
+  // Convert the human-readable HL amount to a bigint for exact EVM comparison.
+  // If the amount has more decimal places than the token supports, truncate to avoid parseUnits errors.
   let amountBigInt: bigint;
   try {
-    if (record.tokenSymbol === USDC_SYMBOL) {
-      const amountStr = truncateToDecimals(record.amount, USDC_EVM_DECIMALS);
-      amountBigInt = ethers.parseUnits(amountStr, USDC_EVM_DECIMALS);
-    } else {
-      amountBigInt = ethers.parseUnits(record.amount, record.decimals);
-    }
+    const decimals = record.decimals;
+    const amountStr =
+      countDecimals(record.amount) > decimals
+        ? truncateToDecimals(record.amount, decimals)
+        : record.amount;
+    amountBigInt = ethers.parseUnits(amountStr, decimals);
   } catch (err) {
     console.error(`[Matcher] Cannot parse amount "${record.amount}" for ${record.hlTxHash}:`, err);
     await markRetried(record._id, record.retryCount, true /* exhaust retries */);

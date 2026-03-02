@@ -1,5 +1,5 @@
 import { getBridgeTransfers, SendAssetEntry } from '../services/hyperliquid';
-import { getTokenInfo, getEvmDecimals } from '../services/token-cache';
+import { getTokenInfo, getEvmDecimals, getSystemAddress } from '../services/token-cache';
 import { TransferModel } from '../models/transfer.model';
 import { CursorModel } from '../models/cursor.model';
 import { config } from '../config';
@@ -79,8 +79,22 @@ async function ingestEntry(entry: SendAssetEntry, senderWallet: string): Promise
   const evmTokenAddress = tokenInfo?.evmContract?.address?.toLowerCase() ?? null;
   const tokenSymbol = tokenInfo?.name ?? delta.token.split(':')[0] ?? delta.token;
 
-  //skipping USDC transfers for now as they are not supported by the matcher as this is deprecated.
-  if (tokenSymbol === 'USDC') {
+  // Validate that delta.destination is the expected system address for this token.
+  // Plain P2P Hypercore transfers share the same sourceDex/destinationDex flags but
+  // have a normal wallet address as the destination, not the bridge system address.
+  const expectedSystemAddress = getSystemAddress(delta.token);
+  if (!expectedSystemAddress) {
+    console.warn(
+      `[Indexer] Unknown token "${delta.token}" in tx ${entry.hash}, cannot validate system address — skipping`,
+    );
+    return;
+  }
+  
+  if (delta.destination.toLowerCase() !== expectedSystemAddress.toLowerCase()) {
+    console.log(
+      `[Indexer] Skipping P2P transfer ${entry.hash}: destination ${delta.destination} ` +
+        `does not match system address ${expectedSystemAddress} for token ${tokenSymbol}`,
+    );
     return;
   }
 

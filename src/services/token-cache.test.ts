@@ -66,7 +66,7 @@ vi.mock('./hl-client', () => ({
   },
 }));
 
-import { initTokenCache, getTokenInfo, getEvmDecimals } from './token-cache';
+import { initTokenCache, getTokenInfo, getEvmDecimals, getSystemAddress } from './token-cache';
 
 // ---------------------------------------------------------------------------
 // Constants for getEvmDecimals assertions (not referenced in vi.mock factory)
@@ -167,5 +167,40 @@ describe('getTokenInfo', () => {
   it('returns null for an unknown token', async () => {
     const token = await getTokenInfo('DOESNOTEXIST:0xdeadbeef');
     expect(token).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getSystemAddress — synchronous, requires initialised cache
+// ---------------------------------------------------------------------------
+
+describe('getSystemAddress', () => {
+  // Cache is already warm from the getTokenInfo beforeAll above.
+  // Token order in the mock: index 0 = UETH, index 1 = HYPE, index 2 = USDC
+
+  it('returns 0x20 + zero-padded index for a regular ERC-20 token at index 0', () => {
+    const addr = getSystemAddress('UETH:0xe1edd30daaf5caac3fe63569e24748da');
+    expect(addr).toBe('0x2000000000000000000000000000000000000000');
+  });
+
+  it('returns the hardcoded HYPE system address regardless of array index', () => {
+    const addr = getSystemAddress('HYPE');
+    expect(addr).toBe('0x2222222222222222222222222222222222222222');
+  });
+
+  it('returns the correct index-derived address for a token at index 2', () => {
+    // USDC is the third token (index 2 → 0x02)
+    const addr = getSystemAddress('USDC:0xusdctoken');
+    expect(addr).toBe('0x2000000000000000000000000000000000000002');
+  });
+
+  it('resolves by name alone when no tokenId suffix is present', () => {
+    const byName = getSystemAddress('UETH');
+    const byFull = getSystemAddress('UETH:0xe1edd30daaf5caac3fe63569e24748da');
+    expect(byName).toBe(byFull);
+  });
+
+  it('returns null for an unknown token', () => {
+    expect(getSystemAddress('UNKNOWN:0xdeadbeef')).toBeNull();
   });
 });

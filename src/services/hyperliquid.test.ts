@@ -33,7 +33,49 @@ describe('isBridgeSend', () => {
     expect(isBridgeSend(makeEntry())).toBe(true);
   });
 
-  it('returns false when delta type is not "send"', () => {
+  it('returns true for spotTransfer with token USDC (USDC bridge)', () => {
+    expect(
+      isBridgeSend({
+        time: 1_700_000_000_000,
+        hash: '0xabcdef',
+        delta: {
+          type: 'spotTransfer',
+          token: 'USDC',
+          amount: '10.0',
+          usdcValue: '10.0',
+          user: '0xcf03287a85298166522002c97ae4b1556ff026b3',
+          destination: '0x2000000000000000000000000000000000000000',
+          fee: '0.000607',
+          nativeTokenFee: '0.0',
+          nonce: 1772441118196,
+          feeToken: 'USDC',
+        },
+      } as Parameters<typeof isBridgeSend>[0]),
+    ).toBe(true);
+  });
+
+  it('returns false for spotTransfer when token is not USDC', () => {
+    expect(
+      isBridgeSend({
+        time: 1_700_000_000_000,
+        hash: '0xabcdef',
+        delta: {
+          type: 'spotTransfer',
+          token: 'UETH',
+          amount: '1.0',
+          usdcValue: '1.0',
+          user: '0x1234',
+          destination: '0x2000000000000000000000000000000000000000',
+          fee: '0',
+          nativeTokenFee: '0.0',
+          nonce: null,
+          feeToken: 'USDC',
+        },
+      } as Parameters<typeof isBridgeSend>[0]),
+    ).toBe(false);
+  });
+
+  it('returns false when delta type is neither "send" nor "spotTransfer"', () => {
     expect(isBridgeSend(makeEntry({ type: 'deposit' }))).toBe(false);
   });
 
