@@ -31,7 +31,7 @@ Runs every `POLL_INTERVAL_MS` (default 30 s). For each configured wallet it:
 
 1. Loads the **cursor** (`lastProcessedTime`) from MongoDB — the millisecond timestamp of the last ingested Hyperliquid transaction.
 2. Calls `userNonFundingLedgerUpdates` with `startTime = cursor + 1` so only new entries are fetched.
-3. Filters entries to `sourceDex === 'spot'` and `destinationDex === 'spot'` (spot-to-spot bridge sends).
+3. Filters entries to `sourceDex === 'spot'` and `destinationDex === 'spot'` (spot-to-spot bridge sends) (Exception for USDC where we check spotTransfer as well).
 4. Upserts each entry as a `pending` `TransferRecord` keyed on `hlTxHash` — fully idempotent, safe to re-run after a crash.
 5. Advances the cursor to the newest successfully ingested timestamp.
 
@@ -42,7 +42,7 @@ Runs every `MATCHER_INTERVAL_MS` (default 30 s). For each eligible `pending` rec
 1. Converts the human-readable HL amount to a bigint using the token's EVM decimals (`weiDecimals + evm_extra_wei_decimals`).
 2. Pre-loads already-claimed EVM tx hashes for the same transfer fingerprint (same sender/receiver/amount/token) to avoid double-claiming.
 3. Binary-searches HyperEVM blocks to find the `fromBlock` matching the HL timestamp, then linearly extrapolates `toBlock` over the configured search window.
-4. Queries `eth_getLogs` (ERC-20 tokens) or scans blocks directly (native HYPE) for a matching transfer.
+4. Queries `eth_getLogs` (ERC-20 tokens) or scans blocks directly (native HYPE) for a matching transfer (or withdrawal in the case of USDC).
 5. On match: sets `status = 'matched'` and records the EVM tx hash, block number, and timestamp.
 6. On no match: increments `retryCount` and sets `lastRetryAt`. After `MAX_RETRIES` failed attempts the record is marked `failed`.
 
@@ -213,4 +213,3 @@ All settings are read from environment variables. Copy `.env.example` to get sta
 4. **Block-by-timestamp via provider API** — Replace the current binary-search block detection with a provider API that returns a block number for a given timestamp, e.g. [Etherscan `getblocknobytime`](https://docs.etherscan.io/api-reference/endpoint/getblocknobytime) or [Alchemy](https://docs.alchemy.com/reference/alchemy-getblocknumber).
 5. **Native transfer detection via provider** — Use a third-party provider (e.g. [Alchemy](https://docs.alchemy.com)) to detect native token transfers instead of scanning blocks and parsing transactions.
 6. **Adding Concurrency** - Add parallelism to the existing system during indexing wallets and during transactionHash matching. Due to rate limit issues with public infrastructure this was intentionally left out.
-7. **Adding USDC Support** - USDC is treated differently than the other ERC20 tokens. It appears a spotSend and not a sendAsset in more recent transactions. The previous sendAsset version wasn't able to tracked successfully here.
