@@ -20,17 +20,28 @@ export type TransferStatus = 'pending' | 'matched' | 'failed';
 @index({ sender: 1, hlTimestamp: -1 })
 @index({ receiver: 1, hlTimestamp: -1 })
 @index({ evmFrom: 1, receiver: 1, tokenSymbol: 1, amount: 1 })
+/**
+ * Partial unique index on evmTxHash: only indexes documents where evmTxHash
+ * is an actual string value.  This allows unlimited pending records (null)
+ * while still preventing two HL records from claiming the same EVM tx hash.
+ *
+ * A sparse index is NOT used here because MongoDB sparse indexes skip documents
+ * where the field is absent, but they still index documents where the field is
+ * explicitly set to null — which is exactly what Mongoose does for every new
+ * pending record via the field's `default: null`.  That causes duplicate-key
+ * errors as soon as a second pending record is inserted.
+ */
+@index(
+  { evmTxHash: 1 },
+  { unique: true, partialFilterExpression: { evmTxHash: { $type: 'string' } } },
+)
 export class TransferRecord {
   /** Hyperliquid transaction hash (unique identifier from HL) */
   @prop({ required: true, unique: true, index: true })
   hlTxHash!: string;
 
-  /**
-   * HyperEVM transaction hash — null until matched.
-   * The sparse unique index ensures a single EVM tx can only be claimed by one HL record.
-   * MongoDB sparse indexes exclude null values, so multiple pending (null) records are fine.
-   */
-  @prop({ default: null, sparse: true, unique: true })
+  /** HyperEVM transaction hash — null until matched. */
+  @prop({ default: null })
   evmTxHash?: string | null;
 
   /** Sender wallet (the Hyperliquid account that initiated the transfer) */

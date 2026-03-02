@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { config } from './config';
+import { TransferModel } from './models/transfer.model';
 
 export async function connectDb(): Promise<void> {
   mongoose.connection.on('disconnected', () => console.warn('[DB] Disconnected from MongoDB'));
@@ -13,6 +14,9 @@ export async function connectDb(): Promise<void> {
     appName: 'hl-indexer',
   });
   console.log('[DB] Connected to MongoDB');
+
+  // Align indexes with schema (evmTxHash is sparse unique so multiple pending nulls are allowed)
+  await TransferModel.syncIndexes();
 }
 
 export async function disconnectDb(): Promise<void> {

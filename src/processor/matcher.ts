@@ -7,6 +7,23 @@ import { config } from '../config';
 /** Symbol used to identify HYPE as the native gas token on HyperEVM */
 const HYPE_SYMBOL = 'HYPE';
 
+/** Symbol used to identify USDC as the USDC token on HyperEVM */
+const USDC_SYMBOL = 'USDC';
+
+/** USDC uses 6 decimals on HyperEVM (HL may send 8-decimal amounts). */
+const USDC_EVM_DECIMALS = 6;
+
+/**
+ * Truncates a decimal string to at most `decimals` fractional digits (no rounding).
+ */
+function truncateToDecimals(value: string, decimals: number): string {
+  const idx = value.indexOf('.');
+  if (idx === -1 || decimals <= 0) return value;
+  const whole = value.slice(0, idx);
+  const frac = value.slice(idx + 1).slice(0, decimals);
+  return frac.length === 0 ? whole : `${whole}.${frac}`;
+}
+
 /**
  * Runs one matcher pass: picks up pending transfers and attempts to locate
  * their counterpart transaction on HyperEVM.
@@ -49,7 +66,12 @@ async function matchTransfer(record: DocumentType<TransferRecord>): Promise<void
   // Convert the human-readable HL amount to a bigint for exact EVM comparison
   let amountBigInt: bigint;
   try {
-    amountBigInt = ethers.parseUnits(record.amount, record.decimals);
+    if (record.tokenSymbol === USDC_SYMBOL) {
+      const amountStr = truncateToDecimals(record.amount, USDC_EVM_DECIMALS);
+      amountBigInt = ethers.parseUnits(amountStr, USDC_EVM_DECIMALS);
+    } else {
+      amountBigInt = ethers.parseUnits(record.amount, record.decimals);
+    }
   } catch (err) {
     console.error(`[Matcher] Cannot parse amount "${record.amount}" for ${record.hlTxHash}:`, err);
     await markRetried(record._id, record.retryCount, true /* exhaust retries */);

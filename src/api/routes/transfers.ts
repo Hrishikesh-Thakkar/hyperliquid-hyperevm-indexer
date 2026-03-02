@@ -2,6 +2,61 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { TransferModel } from '../../models/transfer.model';
 
 // ---------------------------------------------------------------------------
+// Explorer URL prefixes
+// ---------------------------------------------------------------------------
+
+const HYPERCORE_TX_BASE = 'https://www.flowscan.xyz/tx/';
+const EVM_TX_BASE = 'https://hyperevmscan.io/tx/';
+
+// ---------------------------------------------------------------------------
+// Response serialiser
+//
+// Converts a raw Mongoose lean document into the public API shape:
+//   - adds computed explorer URL fields
+//   - strips MongoDB/Mongoose internals (_id, __v, createdAt, updatedAt)
+//   - strips internal bookkeeping fields (retryCount, lastRetryAt, decimals)
+// ---------------------------------------------------------------------------
+
+type LeanTransfer = {
+  hlTxHash: string;
+  evmTxHash?: string | null;
+  sender: string;
+  receiver: string;
+  evmFrom: string;
+  hlToken: string;
+  evmTokenAddress?: string | null;
+  tokenSymbol: string;
+  amount: string;
+  decimals: number;
+  hlTimestamp: Date;
+  evmTimestamp?: Date | null;
+  evmBlockNumber?: number | null;
+  status: string;
+  [key: string]: unknown;
+};
+
+function toTransferResponse(doc: LeanTransfer) {
+  return {
+    hlTxHash:        doc.hlTxHash,
+    evmTxHash:       doc.evmTxHash ?? null,
+    hypercoreTxUrl:  `${HYPERCORE_TX_BASE}${doc.hlTxHash}`,
+    evmTxUrl:        doc.evmTxHash ? `${EVM_TX_BASE}${doc.evmTxHash}` : null,
+    sender:          doc.sender,
+    receiver:        doc.receiver,
+    evmFrom:         doc.evmFrom,
+    hlToken:         doc.hlToken,
+    evmTokenAddress: doc.evmTokenAddress ?? null,
+    tokenSymbol:     doc.tokenSymbol,
+    amount:          doc.amount,
+    decimals:        doc.decimals,
+    hlTimestamp:     doc.hlTimestamp,
+    evmTimestamp:    doc.evmTimestamp ?? null,
+    evmBlockNumber:  doc.evmBlockNumber ?? null,
+    status:          doc.status,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Query / param schemas (used by Fastify for validation + serialisation)
 // ---------------------------------------------------------------------------
 
@@ -71,7 +126,7 @@ export async function transferRoutes(fastify: FastifyInstance): Promise<void> {
         TransferModel.countDocuments(filter),
       ]);
 
-      return reply.send({ total, offset, limit, transfers });
+      return reply.send({ total, offset, limit, transfers: transfers.map(toTransferResponse) });
     },
   );
 
@@ -98,7 +153,7 @@ export async function transferRoutes(fastify: FastifyInstance): Promise<void> {
         return reply.status(404).send({ error: 'Transfer not found' });
       }
 
-      return reply.send(transfer);
+      return reply.send(toTransferResponse(transfer));
     },
   );
 }

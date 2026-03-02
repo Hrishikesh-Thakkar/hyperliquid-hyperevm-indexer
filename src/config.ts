@@ -27,6 +27,7 @@ export const config = {
       '0x4F0A01BAdAa24F762CeE620883f16C4460c06Be0',
       '0xFaCC5b022641e9905bA3bac29b26E6d6191f2B8B',
       '0x97e7d0c24d485aa07e8218528f8dfcd00ac63f75',
+      '0xcf03287A85298166522002c97aE4B1556fF026B3',
     ].join(',')
   )
     .split(',')

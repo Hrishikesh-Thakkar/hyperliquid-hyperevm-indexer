@@ -30,15 +30,29 @@ import type { FastifyInstance } from 'fastify';
 // ---------------------------------------------------------------------------
 
 const MOCK_TRANSFER = {
+  // MongoDB internals — should be stripped from API responses
   _id: 'abc123',
+  __v: 0,
+  createdAt: new Date('2024-01-01').toISOString(),
+  updatedAt: new Date('2024-01-01').toISOString(),
+  // Internal bookkeeping — should be stripped from API responses
+  retryCount: 0,
+  lastRetryAt: null,
+  decimals: 18,
+  // Public fields
   hlTxHash: '0xhl-hash-001',
   evmTxHash: '0xevm-hash-001',
   sender: '0x30d83d444e230f652e2c62cb5697c8dad503987b',
   receiver: '0x30d83d444e230f652e2c62cb5697c8dad503987b',
+  evmFrom: '0x2020000000000000000000000000000000000042',
+  hlToken: 'UETH:0xe1edd30daaf5caac3fe63569e24748da',
+  evmTokenAddress: '0xbe6727b535545c67d5caa73dea6a861ac28a3540',
   tokenSymbol: 'UETH',
   amount: '1.0',
   status: 'matched',
   hlTimestamp: new Date('2024-01-01').toISOString(),
+  evmTimestamp: new Date('2024-01-01T00:00:05Z').toISOString(),
+  evmBlockNumber: 1234567,
 };
 
 // ---------------------------------------------------------------------------
@@ -119,11 +133,23 @@ describe('GET /transfers/:wallet', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    const body = res.json<{ total: number; transfers: unknown[] }>();
+    const body = res.json<{ total: number; transfers: Record<string, unknown>[] }>();
     expect(body.total).toBe(1);
     expect(body.transfers).toHaveLength(1);
     expect(body).toHaveProperty('limit');
     expect(body).toHaveProperty('offset');
+
+    const transfer = body.transfers[0];
+    // Explorer URLs must be present
+    expect(transfer.hypercoreTxUrl).toBe('https://www.flowscan.xyz/tx/0xhl-hash-001');
+    expect(transfer.evmTxUrl).toBe('https://hyperevmscan.io/tx/0xevm-hash-001');
+    // MongoDB / bookkeeping fields must be absent
+    expect(transfer).not.toHaveProperty('_id');
+    expect(transfer).not.toHaveProperty('__v');
+    expect(transfer).not.toHaveProperty('createdAt');
+    expect(transfer).not.toHaveProperty('updatedAt');
+    expect(transfer).not.toHaveProperty('retryCount');
+    expect(transfer).not.toHaveProperty('lastRetryAt');
   });
 
   it('forwards the status query param as a DB filter', async () => {
@@ -187,8 +213,26 @@ describe('GET /transfers/tx/:hash', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    const body = res.json<typeof MOCK_TRANSFER>();
+    const body = res.json<Record<string, unknown>>();
     expect(body.hlTxHash).toBe('0xhl-hash-001');
+    expect(body.hypercoreTxUrl).toBe('https://www.flowscan.xyz/tx/0xhl-hash-001');
+    expect(body.evmTxUrl).toBe('https://hyperevmscan.io/tx/0xevm-hash-001');
+    expect(body).not.toHaveProperty('_id');
+    expect(body).not.toHaveProperty('retryCount');
+  });
+
+  it('evmTxUrl is null when the transfer is still pending', async () => {
+    vi.mocked(TransferModel.findOne).mockReturnValue(
+      mockFindOneChain({ ...MOCK_TRANSFER, evmTxHash: null, status: 'pending' }) as never,
+    );
+
+    const res = await app.inject({ method: 'GET', url: '/transfers/tx/0xhl-hash-001' });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json<Record<string, unknown>>();
+    expect(body.evmTxUrl).toBeNull();
+    // hypercoreTxUrl is always present
+    expect(body.hypercoreTxUrl).toBe('https://www.flowscan.xyz/tx/0xhl-hash-001');
   });
 
   it('returns 404 when no transfer matches the hash', async () => {
