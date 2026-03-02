@@ -79,6 +79,11 @@ async function ingestEntry(entry: SendAssetEntry, senderWallet: string): Promise
   const evmTokenAddress = tokenInfo?.evmContract?.address?.toLowerCase() ?? null;
   const tokenSymbol = tokenInfo?.name ?? delta.token.split(':')[0] ?? delta.token;
 
+  //skipping USDC transfers for now as they are not supported by the matcher as this is deprecated.
+  if (tokenSymbol === 'USDC') {
+    return;
+  }
+
   // $setOnInsert ensures we never overwrite a record that was already matched/failed
   await TransferModel.updateOne(
     { hlTxHash: entry.hash },
