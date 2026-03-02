@@ -1,0 +1,46 @@
+{
+  "name": "hyperliquid-hyperevm-indexer",
+  "version": "1.0.0",
+  "description": "A Real Time Indexer which indexes transfers between Hyperliquid and HyperEVM and exposes the data via APIs",
+  "homepage": "https://github.com/Hrishikesh-Thakkar/hyperliquid-hyperevm-indexer#readme",
+  "bugs": {
+    "url": "https://github.com/Hrishikesh-Thakkar/hyperliquid-hyperevm-indexer/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hrishikesh-Thakkar/hyperliquid-hyperevm-indexer.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@fastify/cors": "^8.5.0",
+    "@nktkas/hyperliquid": "^0.31.0",
+    "@typegoose/typegoose": "^12.21.0",
+    "dotenv": "^16.6.1",
+    "ethers": "^6.16.0",
+    "fastify": "^4.29.1",
+    "mongoose": "^8.21.1",
+    "reflect-metadata": "^0.2.2",
+    "viem": "^2.46.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "pino-pretty": "^13.1.3",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0",
+    "vitest": "^4.0.18"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
