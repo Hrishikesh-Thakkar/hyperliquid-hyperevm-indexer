@@ -32,11 +32,15 @@ const ERC20_TRANSFER_TOPIC = keccak256(
   stringToBytes('Transfer(address,address,uint256)'),
 );
 
+const ERC20_WITHDRAW_TOPIC = keccak256(
+  stringToBytes('Withdraw(address,uint256)'),
+);
+
 /**
  * Maximum blocks per eth_getLogs request.
  * Some RPC providers cap this; 2000 is a conservative limit.
  */
-const MAX_LOG_RANGE = 2000;
+const MAX_LOG_RANGE = 200;
 
 // ---------------------------------------------------------------------------
 // Result type
@@ -188,8 +192,8 @@ export async function findErc20Transfers(
 
   for (let start = fromBlock; start <= toBlock; start += MAX_LOG_RANGE) {
     const end = Math.min(start + MAX_LOG_RANGE - 1, toBlock);
-
-    const logs = await hyperEvmProvider.request({
+    console.log(numberToHex(BigInt(fromBlock)), numberToHex(BigInt(toBlock)));
+    const transferLogs = await hyperEvmProvider.request({
       method: 'eth_getLogs',
       params: [
         {
@@ -201,16 +205,35 @@ export async function findErc20Transfers(
       ],
     }) as RawLog[];
 
-    const candidates = logs.filter(
+    const candidates = transferLogs.filter(
       (log) =>
         hexToBigInt(log.data as `0x${string}`) === amount &&
         !excludeTxHashes.has(log.transactionHash),
     );
 
-    if (candidates.length === 0) continue;
+    console.log(config.hyperEvmRpcUrl);    
+    const withdrawLogs = await hyperEvmProvider.request({
+      method: 'eth_getLogs',
+      params: [
+        {
+          address: getAddress(tokenContract),
+          topics: [ERC20_WITHDRAW_TOPIC, toTopic],
+          fromBlock: numberToHex(BigInt(start)),
+          toBlock: numberToHex(BigInt(start + 2)),
+        },
+      ],
+    }) as RawLog[];
+
+    const withdrawCandidates = withdrawLogs.filter(
+      (log) =>
+        hexToBigInt(log.data as `0x${string}`) === amount &&
+        !excludeTxHashes.has(log.transactionHash),
+    );
+    const allCandidates = [...candidates, ...withdrawCandidates];
+    if (allCandidates.length === 0) continue;
 
     // Fetch the block timestamp for the first candidate's block only
-    const firstLog = candidates[0];
+    const firstLog = allCandidates[0];
     const blockNum = Number(hexToBigInt(firstLog.blockNumber as `0x${string}`));
     const block = await hyperEvmProvider.getBlock({ blockNumber: BigInt(blockNum) });
     const timestamp = block ? Number(block.timestamp) * 1000 : 0;

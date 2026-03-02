@@ -50,7 +50,7 @@ export async function runMatcher(): Promise<void> {
       { lastRetryAt: { $lt: new Date(Date.now() - config.retryDelayMs) } },
     ],
   })
-    .sort({ hlTimestamp: 1 }) // oldest first — prioritise longest-waiting records
+    .sort({ retryCount: 1 , hlTimestamp: 1}) // those which haven't been tried then oldest first — prioritise longest-waiting records
     .limit(20); // cap per-run to avoid overwhelming the EVM RPC
 
   if (eligible.length === 0) return;
