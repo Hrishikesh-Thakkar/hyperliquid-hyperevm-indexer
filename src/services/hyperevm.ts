@@ -192,7 +192,6 @@ export async function findErc20Transfers(
 
   for (let start = fromBlock; start <= toBlock; start += MAX_LOG_RANGE) {
     const end = Math.min(start + MAX_LOG_RANGE - 1, toBlock);
-    console.log(numberToHex(BigInt(fromBlock)), numberToHex(BigInt(toBlock)));
     const transferLogs = await hyperEvmProvider.request({
       method: 'eth_getLogs',
       params: [
@@ -210,8 +209,6 @@ export async function findErc20Transfers(
         hexToBigInt(log.data as `0x${string}`) === amount &&
         !excludeTxHashes.has(log.transactionHash),
     );
-
-    console.log(config.hyperEvmRpcUrl);    
     const withdrawLogs = await hyperEvmProvider.request({
       method: 'eth_getLogs',
       params: [

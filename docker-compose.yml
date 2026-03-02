@@ -6,7 +6,7 @@ services:
       - "${API_PORT:-3000}:3000"
     environment:
       MONGO_URI: mongodb://mongo:27017/hl-indexer
-      HYPEREVM_RPC_URL: ${HYPEREVM_RPC_URL}
+      HYPEREVM_RPC_URL: ${HYPEREVM_RPC_URL:-https://hyperliquid.drpc.org}
       HL_API_URL: ${HL_API_URL:-https://api.hyperliquid.xyz/info}
       API_PORT: "3000"
       LOG_LEVEL: ${LOG_LEVEL:-info}
