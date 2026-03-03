@@ -73,7 +73,7 @@ Stores `lastProcessedTime` per wallet so the indexer resumes from the right poin
 
 ## REST API
 
-### `GET /transfers/:wallet`
+### `GET /transfers/:wallet` <e.g http://localhost:3000/transfers/0x123>
 
 Returns all bridge transfers where the wallet is the sender or receiver.
 
@@ -111,13 +111,13 @@ Returns all bridge transfers where the wallet is the sender or receiver.
 
 ---
 
-### `GET /transfers/tx/:hash`
+### `GET /transfers/tx/:hash` <e.g http://localhost:3000/transfers/tx/0x123>
 
 Look up a single transfer by either its Hyperliquid tx hash or its HyperEVM tx hash. Returns `404` if not found.
 
 ---
 
-### `GET /health`
+### `GET /health` <e.g http://localhost:3000/health>
 
 Returns `200` when the service is up and MongoDB is connected. Returns `503` when the database is unreachable — useful for container health probes.
 
