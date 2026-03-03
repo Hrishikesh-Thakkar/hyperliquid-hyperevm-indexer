@@ -58,7 +58,6 @@ export async function getBridgeTransfers(
  *
  * Accepts:
  *   - delta.type === 'send' with sourceDex === 'spot' and destinationDex === 'spot'
- *   - delta.type === 'spotTransfer' with token === 'USDC' (USDC bridge only)
  */
 export function isBridgeSend(entry: LedgerEntry): entry is SendAssetEntry {
   const d = entry.delta as {
@@ -67,7 +66,8 @@ export function isBridgeSend(entry: LedgerEntry): entry is SendAssetEntry {
     sourceDex?: string;
     destinationDex?: string;
   };
-  if (d.type === 'spotTransfer') return d.token === 'USDC';
+  //TODO: Should consider spot transfers as true as well and if destination is a system address it will result in bridging but not in scope of this project. should only track sendAsset entries.
+  //if (d.type === 'spotTransfer') return true';
   return (
     d.type === 'send' &&
     d.sourceDex === 'spot' &&
