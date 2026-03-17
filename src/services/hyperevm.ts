@@ -1,4 +1,5 @@
 import { config } from '../config';
+import { logger } from '../logger';
 import {
   createPublicClient,
   http,
@@ -23,6 +24,20 @@ export const hyperEvmProvider = createPublicClient({
   chain: hyperliquid,
   transport: http(config.hyperEvmRpcUrl, { timeout: 30_000 }),
 });
+
+// ---------------------------------------------------------------------------
+// Startup check
+// ---------------------------------------------------------------------------
+
+/**
+ * Verifies that the HyperEVM RPC is reachable by fetching the latest block number.
+ * Called once at startup so the app fails fast with a clear error rather than
+ * silently failing to match transfers later.
+ */
+export async function checkEvmConnectivity(): Promise<void> {
+  const blockNumber = await hyperEvmProvider.getBlockNumber();
+  logger.info({ blockNumber: Number(blockNumber), rpcUrl: config.hyperEvmRpcUrl }, '[HyperEVM] RPC connectivity verified');
+}
 
 // ---------------------------------------------------------------------------
 // Constants

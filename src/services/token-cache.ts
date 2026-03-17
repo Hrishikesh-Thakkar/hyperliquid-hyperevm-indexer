@@ -1,5 +1,6 @@
 import type { SpotMetaResponse } from '@nktkas/hyperliquid';
 import { infoClient } from './hl-client';
+import { logger } from '../logger';
 
 // Re-export the SDK token type so the rest of the codebase can reference it
 export type SpotToken = SpotMetaResponse['tokens'][number];
@@ -56,7 +57,7 @@ async function refreshCache(): Promise<void> {
   cache = nextCache;
   systemAddressMap = nextSystemAddresses;
   cacheRefreshedAt = Date.now();
-  console.log(`[TokenCache] Refreshed — ${data.tokens.length} tokens loaded`);
+  logger.info({ tokenCount: data.tokens.length }, '[TokenCache] Refreshed');
 }
 
 /** Call once at startup to pre-warm the cache. */
@@ -76,7 +77,7 @@ export async function getTokenInfo(hlTokenString: string): Promise<SpotToken | n
     try {
       await refreshCache();
     } catch (err) {
-      console.warn('[TokenCache] Failed to refresh; using stale cache:', err);
+      logger.warn({ err }, '[TokenCache] Failed to refresh; using stale cache');
     }
   }
 

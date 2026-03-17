@@ -30,6 +30,7 @@
     "ethers": "^6.16.0",
     "fastify": "^4.29.1",
     "mongoose": "^8.21.1",
+    "pino": "^10.3.1",
     "reflect-metadata": "^0.2.2",
     "viem": "^2.46.3"
   },
