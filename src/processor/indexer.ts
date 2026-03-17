@@ -1,8 +1,9 @@
 import { getBridgeTransfers, SendAssetEntry } from '../services/hyperliquid';
 import { getTokenInfo, getEvmDecimals, getSystemAddress } from '../services/token-cache';
-import { TransferModel } from '../models/transfer.model';
+import { transferRepository } from '../repositories/transfer.repository';
 import { CursorModel } from '../models/cursor.model';
 import { config } from '../config';
+import { logger } from '../logger';
 
 /**
  * Runs one indexer pass for every configured wallet.
@@ -21,7 +22,7 @@ export async function runIndexer(): Promise<void> {
     try {
       await indexWallet(wallet);
     } catch (err) {
-      console.error(`[Indexer] Error indexing wallet ${wallet}:`, err);
+      logger.error({ wallet, err }, '[Indexer] Error indexing wallet');
     }
   }
 }
@@ -57,7 +58,7 @@ async function indexWallet(wallet: string): Promise<void> {
       // timestamp is lower than all successful ones will be retried next poll.
       // If a failed entry sits between two successful ones the cursor will advance
       // past it; such entries are expected to be rare (e.g. transient DB errors).
-      console.error(`[Indexer] Failed to ingest entry ${entry.hash}:`, err);
+      logger.error({ wallet, hash: entry.hash, err }, '[Indexer] Failed to ingest entry');
       failCount++;
     }
   }
@@ -66,8 +67,9 @@ async function indexWallet(wallet: string): Promise<void> {
     await CursorModel.updateOne({ wallet }, { lastProcessedTime: newLastProcessedTime });
   }
 
-  console.log(
-    `[Indexer] ${wallet}: ${successCount} ingested, ${failCount} failed, cursor → ${newLastProcessedTime}`,
+  logger.info(
+    { wallet, ingested: successCount, failed: failCount, cursor: newLastProcessedTime },
+    '[Indexer] Wallet pass complete',
   );
 }
 
@@ -84,42 +86,37 @@ async function ingestEntry(entry: SendAssetEntry, senderWallet: string): Promise
   // have a normal wallet address as the destination, not the bridge system address.
   const expectedSystemAddress = getSystemAddress(delta.token);
   if (!expectedSystemAddress) {
-    console.warn(
-      `[Indexer] Unknown token "${delta.token}" in tx ${entry.hash}, cannot validate system address — skipping`,
+    logger.warn(
+      { token: delta.token, hash: entry.hash },
+      '[Indexer] Unknown token — cannot validate system address, skipping',
     );
     return;
   }
-  
+
   if (delta.destination.toLowerCase() !== expectedSystemAddress.toLowerCase()) {
-    console.log(
-      `[Indexer] Skipping P2P transfer ${entry.hash}: destination ${delta.destination} ` +
-        `does not match system address ${expectedSystemAddress} for token ${tokenSymbol}`,
+    logger.debug(
+      { hash: entry.hash, destination: delta.destination, expected: expectedSystemAddress, token: tokenSymbol },
+      '[Indexer] Skipping P2P transfer (destination is not system address)',
     );
     return;
   }
 
   // $setOnInsert ensures we never overwrite a record that was already matched/failed
-  await TransferModel.updateOne(
-    { hlTxHash: entry.hash },
-    {
-      $setOnInsert: {
-        hlTxHash: entry.hash,
-        // delta.user is both the HL sender and the HyperEVM recipient (same address)
-        sender: (delta.user ?? senderWallet).toLowerCase(),
-        receiver: (delta.user ?? senderWallet).toLowerCase(),
-        // delta.destination is the bridge system address — the `from` in the EVM Transfer event
-        evmFrom: delta.destination.toLowerCase(),
-        hlToken: delta.token,
-        evmTokenAddress,
-        tokenSymbol,
-        amount: delta.amount,
-        decimals,
-        hlTimestamp: new Date(entry.time),
-        status: 'pending',
-        retryCount: 0,
-        lastRetryAt: null,
-      },
-    },
-    { upsert: true },
-  );
+  await transferRepository.upsertPending(entry.hash, {
+    // delta.user is both the HL sender and the HyperEVM recipient (same address)
+    sender: (delta.user ?? senderWallet).toLowerCase(),
+    receiver: (delta.user ?? senderWallet).toLowerCase(),
+    // delta.destination is the bridge system address — the `from` in the EVM Transfer event
+    evmFrom: delta.destination.toLowerCase(),
+    hlToken: delta.token,
+    evmTokenAddress,
+    tokenSymbol,
+    amount: delta.amount,
+    decimals,
+    hlTimestamp: new Date(entry.time),
+    status: 'pending',
+    retryCount: 0,
+    lastRetryAt: null,
+    nextRetryAt: null,
+  });
 }

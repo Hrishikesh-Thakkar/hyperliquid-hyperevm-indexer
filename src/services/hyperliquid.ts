@@ -1,6 +1,5 @@
 import type { UserNonFundingLedgerUpdatesResponse } from '@nktkas/hyperliquid';
 import { infoClient } from './hl-client';
-import { getSystemAddress } from './token-cache';
 
 // ---------------------------------------------------------------------------
 // Derived types from the SDK response

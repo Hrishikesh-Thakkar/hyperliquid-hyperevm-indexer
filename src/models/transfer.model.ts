@@ -115,9 +115,16 @@ export class TransferRecord {
   @prop({ required: true, default: 0 })
   retryCount!: number;
 
-  /** Timestamp of the last matcher attempt — used to enforce retry back-off */
+  /** Timestamp of the last matcher attempt */
   @prop({ default: null })
   lastRetryAt?: Date | null;
+
+  /**
+   * Earliest time the matcher should attempt this record again.
+   * Computed using exponential backoff; null when never retried or record is exhausted.
+   */
+  @prop({ default: null })
+  nextRetryAt?: Date | null;
 }
 
 export const TransferModel = getModelForClass(TransferRecord);
