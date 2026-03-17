@@ -4,18 +4,18 @@ import { transferRepository } from '../repositories/transfer.repository';
 import { CursorModel } from '../models/cursor.model';
 import { config } from '../config';
 import { logger } from '../logger';
+import { RetriableError, NonRetriableError, classifyUnknownError } from '../errors';
+import { indexerTransfersTotal } from '../metrics';
+
+/** How long a wallet lock is held (ms). Must exceed the longest possible indexer pass. */
+const WALLET_LOCK_DURATION_MS = 120_000; // 2 minutes
 
 /**
  * Runs one indexer pass for every configured wallet.
  *
- * For each wallet:
- *   1. Load the cursor (last processed HL timestamp) from MongoDB.
- *   2. Fetch new spot→spot sendAsset entries from the HL SDK.
- *   3. Upsert each entry as a pending TransferRecord.
- *   4. Advance the cursor to the newest entry's timestamp.
- *
- * The upsert on `hlTxHash` makes this fully idempotent — safe to re-run
- * on restart without duplicating records.
+ * Each wallet is atomically claimed via `lockedUntil` before processing.
+ * If another worker instance already holds the lock, the wallet is skipped.
+ * Locks auto-expire so a crashed worker does not permanently block a wallet.
  */
 export async function runIndexer(): Promise<void> {
   for (const wallet of config.wallets) {
@@ -28,95 +28,134 @@ export async function runIndexer(): Promise<void> {
 }
 
 async function indexWallet(wallet: string): Promise<void> {
-  // Fetch-or-create the cursor for this wallet (atomic upsert)
+  // Atomically claim the wallet: upsert if new, skip if another worker holds the lock
+  const now = new Date();
+  const lockExpiry = new Date(now.getTime() + WALLET_LOCK_DURATION_MS);
+
   const cursor = await CursorModel.findOneAndUpdate(
-    { wallet },
-    { $setOnInsert: { wallet, lastProcessedTime: 0 } },
+    {
+      wallet,
+      $or: [
+        { lockedUntil: null },
+        { lockedUntil: { $lt: now } }, // expired lock — safe to reclaim
+      ],
+    },
+    {
+      $setOnInsert: { wallet, lastProcessedTime: 0 },
+      $set: { lockedUntil: lockExpiry },
+    },
     { upsert: true, new: true },
   );
 
-  const startTime = cursor.lastProcessedTime > 0 ? cursor.lastProcessedTime + 1 : undefined;
+  if (!cursor) {
+    // Another worker holds the lock for this wallet — skip
+    logger.debug({ wallet }, '[Indexer] Wallet locked by another instance, skipping');
+    return;
+  }
+
+  try {
+    await processWallet(wallet, cursor.lastProcessedTime);
+  } finally {
+    // Release the lock so other instances can pick it up on the next interval
+    await CursorModel.updateOne({ wallet }, { $set: { lockedUntil: null } });
+  }
+}
+
+async function processWallet(wallet: string, lastProcessedTime: number): Promise<void> {
+  const startTime = lastProcessedTime > 0 ? lastProcessedTime + 1 : undefined;
   const entries = await getBridgeTransfers(wallet, startTime);
 
   if (entries.length === 0) return;
 
-  // Sort entries in ascending order of time
+  // Sort entries in ascending order of time so the cursor always moves forward
   entries.sort((a, b) => a.time - b.time);
 
-  let newLastProcessedTime = cursor.lastProcessedTime;
+  let newLastProcessedTime = lastProcessedTime;
   let successCount = 0;
-  let failCount = 0;
+  let skippedCount = 0;
 
   for (const entry of entries) {
     try {
       await ingestEntry(entry, wallet);
       newLastProcessedTime = Math.max(newLastProcessedTime, entry.time);
       successCount++;
+      indexerTransfersTotal.inc({ result: 'ingested' });
     } catch (err) {
-      // Log and continue — a single bad entry should not block the rest of the batch.
-      // The cursor only advances for successful entries, so a failed entry whose
-      // timestamp is lower than all successful ones will be retried next poll.
-      // If a failed entry sits between two successful ones the cursor will advance
-      // past it; such entries are expected to be rare (e.g. transient DB errors).
-      logger.error({ wallet, hash: entry.hash, err }, '[Indexer] Failed to ingest entry');
-      failCount++;
+      const classified = classifyUnknownError(err);
+
+      if (classified instanceof NonRetriableError) {
+        // Permanent failure — advance the cursor past this entry.
+        logger.warn(
+          { wallet, hash: entry.hash, reason: classified.message },
+          '[Indexer] Skipping non-retriable entry',
+        );
+        newLastProcessedTime = Math.max(newLastProcessedTime, entry.time);
+        skippedCount++;
+        indexerTransfersTotal.inc({ result: 'skipped' });
+      } else {
+        // Transient failure — stop the batch so the cursor doesn't advance past this entry.
+        logger.error(
+          { wallet, hash: entry.hash, err: classified.cause ?? classified },
+          '[Indexer] Retriable error — stopping batch to preserve entry for next poll',
+        );
+        indexerTransfersTotal.inc({ result: 'retriable' });
+        break;
+      }
     }
   }
 
-  if (newLastProcessedTime > cursor.lastProcessedTime) {
+  if (newLastProcessedTime > lastProcessedTime) {
     await CursorModel.updateOne({ wallet }, { lastProcessedTime: newLastProcessedTime });
   }
 
   logger.info(
-    { wallet, ingested: successCount, failed: failCount, cursor: newLastProcessedTime },
+    { wallet, ingested: successCount, skipped: skippedCount, cursor: newLastProcessedTime },
     '[Indexer] Wallet pass complete',
   );
 }
 
 async function ingestEntry(entry: SendAssetEntry, senderWallet: string): Promise<void> {
   const { delta } = entry;
-  const tokenInfo = await getTokenInfo(delta.token);
+
+  let tokenInfo;
+  try {
+    tokenInfo = await getTokenInfo(delta.token);
+  } catch (err) {
+    throw new RetriableError(`Failed to fetch token info for "${delta.token}"`, err);
+  }
 
   const decimals = tokenInfo ? getEvmDecimals(tokenInfo) : 18;
   const evmTokenAddress = tokenInfo?.evmContract?.address?.toLowerCase() ?? null;
   const tokenSymbol = tokenInfo?.name ?? delta.token.split(':')[0] ?? delta.token;
 
-  // Validate that delta.destination is the expected system address for this token.
-  // Plain P2P Hypercore transfers share the same sourceDex/destinationDex flags but
-  // have a normal wallet address as the destination, not the bridge system address.
   const expectedSystemAddress = getSystemAddress(delta.token);
   if (!expectedSystemAddress) {
-    logger.warn(
-      { token: delta.token, hash: entry.hash },
-      '[Indexer] Unknown token — cannot validate system address, skipping',
-    );
-    return;
+    throw new NonRetriableError(`Unknown token "${delta.token}" — not found in spotMeta`);
   }
 
   if (delta.destination.toLowerCase() !== expectedSystemAddress.toLowerCase()) {
-    logger.debug(
-      { hash: entry.hash, destination: delta.destination, expected: expectedSystemAddress, token: tokenSymbol },
-      '[Indexer] Skipping P2P transfer (destination is not system address)',
+    throw new NonRetriableError(
+      `P2P transfer ${entry.hash}: destination ${delta.destination} is not the system address`,
     );
-    return;
   }
 
-  // $setOnInsert ensures we never overwrite a record that was already matched/failed
-  await transferRepository.upsertPending(entry.hash, {
-    // delta.user is both the HL sender and the HyperEVM recipient (same address)
-    sender: (delta.user ?? senderWallet).toLowerCase(),
-    receiver: (delta.user ?? senderWallet).toLowerCase(),
-    // delta.destination is the bridge system address — the `from` in the EVM Transfer event
-    evmFrom: delta.destination.toLowerCase(),
-    hlToken: delta.token,
-    evmTokenAddress,
-    tokenSymbol,
-    amount: delta.amount,
-    decimals,
-    hlTimestamp: new Date(entry.time),
-    status: 'pending',
-    retryCount: 0,
-    lastRetryAt: null,
-    nextRetryAt: null,
-  });
+  try {
+    await transferRepository.upsertPending(entry.hash, {
+      sender: (delta.user ?? senderWallet).toLowerCase(),
+      receiver: (delta.user ?? senderWallet).toLowerCase(),
+      evmFrom: delta.destination.toLowerCase(),
+      hlToken: delta.token,
+      evmTokenAddress,
+      tokenSymbol,
+      amount: delta.amount,
+      decimals,
+      hlTimestamp: new Date(entry.time),
+      status: 'pending',
+      retryCount: 0,
+      lastRetryAt: null,
+      nextRetryAt: null,
+    });
+  } catch (err) {
+    throw classifyUnknownError(err);
+  }
 }

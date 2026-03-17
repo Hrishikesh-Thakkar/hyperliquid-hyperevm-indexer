@@ -224,6 +224,7 @@ export async function findErc20Transfers(
         hexToBigInt(log.data as `0x${string}`) === amount &&
         !excludeTxHashes.has(log.transactionHash),
     );
+    //Assumption made that the time taken to bridge is less than 2 blocks. During testing this assumption was found to be true for a sample set of transfers.
     const withdrawLogs = await hyperEvmProvider.request({
       method: 'eth_getLogs',
       params: [

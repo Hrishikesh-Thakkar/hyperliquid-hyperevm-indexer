@@ -4,6 +4,8 @@ import { TransferRecord } from '../models/transfer.model';
 import { transferRepository } from '../repositories/transfer.repository';
 import { findErc20Transfers, findNativeTransfers } from '../services/hyperevm';
 import { logger } from '../logger';
+import { RetriableError, NonRetriableError, classifyUnknownError } from '../errors';
+import { matcherTransfersTotal } from '../metrics';
 
 /** Symbol used to identify HYPE as the native gas token on HyperEVM */
 const HYPE_SYMBOL = 'HYPE';
@@ -28,19 +30,18 @@ function truncateToDecimals(value: string, decimals: number): string {
 }
 
 /**
- * Runs one matcher pass: picks up pending transfers and attempts to locate
- * their counterpart transaction on HyperEVM.
+ * Runs one matcher pass: atomically claims eligible pending transfers and
+ * attempts to locate their counterpart transaction on HyperEVM.
  *
- * A record is eligible for matching when:
- *   - status === 'pending'
- *   - retryCount < MAX_RETRIES
- *   - nextRetryAt is null OR has passed (exponential backoff)
+ * Each record is claimed via findOneAndUpdate so that multiple worker replicas
+ * never process the same record simultaneously.
  *
- * On success  → status set to 'matched', EVM fields populated.
- * On failure  → retryCount incremented; status set to 'failed' if exhausted.
+ * Error classification determines retry behaviour:
+ *   NonRetriableError → force-exhaust retries immediately (bad data, will never match)
+ *   RetriableError    → normal retry with exponential backoff (transient RPC/DB failure)
  */
 export async function runMatcher(): Promise<void> {
-  const eligible = await transferRepository.findEligibleForMatching(20);
+  const eligible = await transferRepository.claimForMatching(20);
 
   if (eligible.length === 0) return;
 
@@ -50,15 +51,29 @@ export async function runMatcher(): Promise<void> {
     try {
       await matchTransfer(record);
     } catch (err) {
-      logger.error({ hlTxHash: record.hlTxHash, err }, '[Matcher] Unexpected error');
-      await transferRepository.markRetried(record._id, record.retryCount);
+      const classified = classifyUnknownError(err);
+      const forceExhaust = classified instanceof NonRetriableError;
+
+      if (forceExhaust) {
+        logger.warn(
+          { hlTxHash: record.hlTxHash, reason: classified.message },
+          '[Matcher] Non-retriable failure — exhausting retries',
+        );
+        matcherTransfersTotal.inc({ result: 'exhausted' });
+      } else {
+        logger.error(
+          { hlTxHash: record.hlTxHash, err: classified.cause ?? classified },
+          '[Matcher] Retriable failure — will retry with backoff',
+        );
+        matcherTransfersTotal.inc({ result: 'retried' });
+      }
+
+      await transferRepository.markRetried(record._id, record.retryCount, forceExhaust);
     }
   }
 }
 
 async function matchTransfer(record: DocumentType<TransferRecord>): Promise<void> {
-  // Convert the human-readable HL amount to a bigint for exact EVM comparison.
-  // If the amount has more decimal places than the token supports, truncate to avoid parseUnits errors.
   let amountBigInt: bigint;
   try {
     const decimals = record.decimals;
@@ -68,18 +83,27 @@ async function matchTransfer(record: DocumentType<TransferRecord>): Promise<void
         : record.amount;
     amountBigInt = ethers.parseUnits(amountStr, decimals);
   } catch (err) {
-    logger.error({ hlTxHash: record.hlTxHash, amount: record.amount, err }, '[Matcher] Cannot parse amount');
-    await transferRepository.markRetried(record._id, record.retryCount, true /* exhaust retries */);
-    return;
+    throw new NonRetriableError(`Cannot parse amount "${record.amount}" for ${record.hlTxHash}`, err);
   }
 
-  const excludeSet = await transferRepository.findUsedEvmHashes(record);
+  let excludeSet: Set<string>;
+  try {
+    excludeSet = await transferRepository.findUsedEvmHashes(record);
+  } catch (err) {
+    throw new RetriableError(`DB error fetching exclusion set for ${record.hlTxHash}`, err);
+  }
+
   const afterTimestamp = record.hlTimestamp.getTime();
 
-  const match =
-    record.tokenSymbol === HYPE_SYMBOL || !record.evmTokenAddress
-      ? await findNativeTransfers(record.evmFrom, record.receiver, amountBigInt, afterTimestamp, undefined, excludeSet)
-      : await findErc20Transfers(record.evmTokenAddress, record.evmFrom, record.receiver, amountBigInt, afterTimestamp, undefined, excludeSet);
+  let match;
+  try {
+    match =
+      record.tokenSymbol === HYPE_SYMBOL || !record.evmTokenAddress
+        ? await findNativeTransfers(record.evmFrom, record.receiver, amountBigInt, afterTimestamp, undefined, excludeSet)
+        : await findErc20Transfers(record.evmTokenAddress, record.evmFrom, record.receiver, amountBigInt, afterTimestamp, undefined, excludeSet);
+  } catch (err) {
+    throw new RetriableError(`HyperEVM RPC error for ${record.hlTxHash}`, err);
+  }
 
   if (match) {
     await transferRepository.markMatched(
@@ -89,6 +113,7 @@ async function matchTransfer(record: DocumentType<TransferRecord>): Promise<void
       match.blockNumber,
     );
     logger.info({ hlTxHash: record.hlTxHash, evmTxHash: match.txHash }, '[Matcher] Transfer matched');
+    matcherTransfersTotal.inc({ result: 'matched' });
     return;
   }
 
@@ -97,4 +122,5 @@ async function matchTransfer(record: DocumentType<TransferRecord>): Promise<void
     { hlTxHash: record.hlTxHash, attempt: record.retryCount + 1 },
     '[Matcher] No EVM match found',
   );
+  matcherTransfersTotal.inc({ result: 'retried' });
 }
