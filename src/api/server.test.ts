@@ -38,6 +38,14 @@ vi.mock('../repositories/transfer.repository', () => ({
   },
 }));
 
+// Mock metrics module (prom-client has side effects at import time)
+vi.mock('../metrics', () => ({
+  metricsRegistry: {
+    metrics: vi.fn().mockResolvedValue('# HELP fake_metric\n'),
+    contentType: 'text/plain; version=0.0.4; charset=utf-8',
+  },
+}));
+
 import { buildServer } from './server';
 import { TransferModel } from '../models/transfer.model';
 import type { FastifyInstance } from 'fastify';

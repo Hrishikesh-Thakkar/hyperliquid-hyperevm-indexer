@@ -4,7 +4,7 @@ import mongoose from 'mongoose';
 import { transferRoutes } from './routes/transfers';
 import { config } from '../config';
 import { processorState } from '../processor';
-import { transferRepository } from '../repositories/transfer.repository';
+import { metricsRegistry } from '../metrics';
 
 export function buildServer(): FastifyInstance {
   const fastify = Fastify({
@@ -56,19 +56,12 @@ export function buildServer(): FastifyInstance {
   });
 
   /**
-   * Metrics endpoint — returns transfer counts by status.
-   * Useful for dashboards and alerting on stuck pending queues.
+   * Prometheus metrics endpoint.
+   * Returns metrics in the Prometheus text exposition format for scraping.
    */
   fastify.get('/metrics', async (_req, reply) => {
-    const counts = await transferRepository.countByStatus();
-    return reply.send({
-      transfers: counts,
-      processor: {
-        indexerLastRunAt: processorState.indexerLastRunAt,
-        matcherLastRunAt: processorState.matcherLastRunAt,
-      },
-      timestamp: new Date().toISOString(),
-    });
+    const metrics = await metricsRegistry.metrics();
+    return reply.type(metricsRegistry.contentType).send(metrics);
   });
 
   return fastify;
@@ -79,7 +72,6 @@ let server: FastifyInstance | null = null;
 export async function startApiServer(): Promise<void> {
   server = buildServer();
   await server.listen({ port: config.apiPort, host: '0.0.0.0' });
-  // Fastify's logger already prints the address; no extra log needed here
 }
 
 export async function stopApiServer(): Promise<void> {

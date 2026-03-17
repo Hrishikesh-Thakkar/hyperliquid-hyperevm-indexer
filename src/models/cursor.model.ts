@@ -1,14 +1,18 @@
-import { prop, getModelForClass, modelOptions } from '@typegoose/typegoose';
+import { prop, getModelForClass, modelOptions, Severity } from '@typegoose/typegoose';
 
 /**
  * Tracks the indexer's progress per wallet so the service can restart
  * at any point without reprocessing already-ingested transactions.
+ *
+ * Also provides distributed locking via `lockedUntil` so that multiple
+ * worker replicas can index wallets concurrently without duplicate work.
  */
 @modelOptions({
   schemaOptions: {
     collection: 'cursors',
     timestamps: true,
   },
+  options: { allowMixed: Severity.ALLOW },
 })
 export class WalletCursor {
   /** The wallet address this cursor belongs to (lowercased) */
@@ -22,6 +26,17 @@ export class WalletCursor {
    */
   @prop({ required: true, default: 0 })
   lastProcessedTime!: number;
+
+  /**
+   * Distributed lock expiry. When a worker instance claims a wallet for
+   * indexing, it sets this to now + lock duration. Other instances skip
+   * wallets whose lock has not expired.
+   *
+   * Null means unlocked. Expired locks (lockedUntil < now) are also treated
+   * as unlocked, providing automatic recovery if a worker crashes mid-run.
+   */
+  @prop({ default: null })
+  lockedUntil?: Date | null;
 }
 
 export const CursorModel = getModelForClass(WalletCursor);

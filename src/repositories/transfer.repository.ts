@@ -12,17 +12,34 @@ import { TransferModel, TransferRecord, TransferStatus } from '../models/transfe
  */
 export class TransferRepository {
   /**
-   * Returns pending records that are due for a matching attempt,
-   * ordered by least-retried first then oldest first.
+   * Atomically claims up to `limit` pending records for matching.
+   *
+   * Each record is claimed via findOneAndUpdate which pushes `nextRetryAt`
+   * 60 seconds into the future.  This acts as a soft lock: if another worker
+   * replica races for the same record, only one wins.  If the winner crashes,
+   * the record automatically becomes eligible again after the 60-second window.
+   *
+   * Returns claimed records ordered by least-retried first, then oldest first.
    */
-  async findEligibleForMatching(limit = 20): Promise<DocumentType<TransferRecord>[]> {
-    return TransferModel.find({
-      status: 'pending',
-      retryCount: { $lt: config.maxRetries },
-      $or: [{ nextRetryAt: null }, { nextRetryAt: { $lte: new Date() } }],
-    })
-      .sort({ retryCount: 1, hlTimestamp: 1 })
-      .limit(limit);
+  async claimForMatching(limit = 20): Promise<DocumentType<TransferRecord>[]> {
+    const claimed: DocumentType<TransferRecord>[] = [];
+    const softLockUntil = new Date(Date.now() + 60_000);
+
+    for (let i = 0; i < limit; i++) {
+      const record = await TransferModel.findOneAndUpdate(
+        {
+          status: 'pending',
+          retryCount: { $lt: config.maxRetries },
+          $or: [{ nextRetryAt: null }, { nextRetryAt: { $lte: new Date() } }],
+        },
+        { $set: { nextRetryAt: softLockUntil } },
+        { sort: { retryCount: 1, hlTimestamp: 1 }, new: true },
+      );
+      if (!record) break;
+      claimed.push(record);
+    }
+
+    return claimed;
   }
 
   /**

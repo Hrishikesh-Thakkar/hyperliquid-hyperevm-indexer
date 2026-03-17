@@ -32,8 +32,8 @@ describe('isBridgeSend', () => {
   it('returns true for a valid spot → spot bridge send', () => {
     expect(isBridgeSend(makeEntry())).toBe(true);
   });
-
-  it('returns true for spotTransfer with token USDC (USDC bridge)', () => {
+  //TODO: Should consider spot transfers as true as well and if destination is a system address it will result in bridging but not in scope of this project. should only track sendAsset entries.
+  it('returns false for spotTransfer with token USDC (USDC bridge)', () => {
     expect(
       isBridgeSend({
         time: 1_700_000_000_000,
@@ -51,7 +51,7 @@ describe('isBridgeSend', () => {
           feeToken: 'USDC',
         },
       } as Parameters<typeof isBridgeSend>[0]),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it('returns false for spotTransfer when token is not USDC', () => {
