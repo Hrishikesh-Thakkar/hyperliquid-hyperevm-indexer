@@ -51,7 +51,7 @@ Runs every `POLL_INTERVAL_MS` (default 30 s). For each configured wallet it:
 1. **Atomically claims** the wallet via `lockedUntil` on the cursor document — prevents duplicate work when running multiple worker replicas.
 2. Loads the **cursor** (`lastProcessedTime`) from MongoDB.
 3. Calls `userNonFundingLedgerUpdates` with `startTime = cursor + 1` so only new entries are fetched.
-4. Filters entries to bridge transfers: `sendAsset` (spot→spot) and `spotTransfer` (USDC bridge).
+4. Filters entries to bridge transfers: `sendAsset` (spot→spot)
 5. Upserts each entry as a `pending` `TransferRecord` keyed on `hlTxHash` — fully idempotent, safe to re-run after a crash.
 6. Advances the cursor to the newest successfully ingested timestamp.
 7. **Releases the wallet lock** so other replicas can pick it up next interval.
@@ -311,7 +311,7 @@ src/
 │   └── transfer.repository.ts # All TransferModel DB operations
 ├── services/
 │   ├── hl-client.ts           # Shared Hyperliquid SDK client
-│   ├── hyperliquid.ts         # Bridge transfer detection (sendAsset + USDC)
+│   ├── hyperliquid.ts         # Bridge transfer detection (sendAsset)
 │   ├── hyperevm.ts            # EVM RPC: block search, log queries, native scans
 │   └── token-cache.ts         # In-memory spotMeta cache (24h TTL)
 ├── config.ts                  # Typed config from env vars with validation
