@@ -4,10 +4,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 // Module mocks — declared before any imports so vitest hoists them correctly
 // ---------------------------------------------------------------------------
 
-vi.mock('../models/transfer.model', () => ({
-  TransferModel: {
-    find: vi.fn(),
-    updateOne: vi.fn(),
+vi.mock('../repositories/transfer.repository', () => ({
+  transferRepository: {
+    findEligibleForMatching: vi.fn(),
+    findUsedEvmHashes: vi.fn(),
+    markMatched: vi.fn(),
+    markRetried: vi.fn(),
   },
 }));
 
@@ -24,8 +26,12 @@ vi.mock('../config', () => ({
   },
 }));
 
+vi.mock('../logger', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), fatal: vi.fn() },
+}));
+
 import { runMatcher } from './matcher';
-import { TransferModel } from '../models/transfer.model';
+import { transferRepository } from '../repositories/transfer.repository';
 import { findErc20Transfers, findNativeTransfers } from '../services/hyperevm';
 
 // ---------------------------------------------------------------------------
@@ -46,7 +52,7 @@ function makeRecord(overrides: Record<string, unknown> = {}): Record<string, unk
     hlTimestamp: new Date('2024-01-01T00:00:00Z'),
     retryCount: 0,
     status: 'pending',
-    lastRetryAt: null,
+    nextRetryAt: null,
     ...overrides,
   };
 }
@@ -60,64 +66,48 @@ const MOCK_EVM_MATCH = {
   amount: 1_000_000_000_000_000_000n,
 };
 
-/** Configures TransferModel.find to return `records` for the eligibility query
- *  and an empty array for the exclusion-set query. */
-function mockEligible(records: ReturnType<typeof makeRecord>[]): void {
-  vi.mocked(TransferModel.find)
-    .mockReturnValueOnce({
-      sort: vi.fn().mockReturnValue({ limit: vi.fn().mockResolvedValue(records) }),
-    } as never)
-    .mockReturnValueOnce({ distinct: vi.fn().mockResolvedValue([]) } as never);
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 describe('runMatcher', () => {
   beforeEach(() => {
-    // resetAllMocks clears call history AND flushes any unconsumed mockReturnValueOnce
-    // queues from previous tests, preventing state leakage between tests.
     vi.resetAllMocks();
-    vi.mocked(TransferModel.updateOne).mockResolvedValue({} as never);
+    vi.mocked(transferRepository.findUsedEvmHashes).mockResolvedValue(new Set());
+    vi.mocked(transferRepository.markMatched).mockResolvedValue();
+    vi.mocked(transferRepository.markRetried).mockResolvedValue();
   });
 
   it('returns early without touching the DB when no eligible transfers exist', async () => {
-    vi.mocked(TransferModel.find).mockReturnValueOnce({
-      sort: vi.fn().mockReturnValue({ limit: vi.fn().mockResolvedValue([]) }),
-    } as never);
+    vi.mocked(transferRepository.findEligibleForMatching).mockResolvedValue([]);
 
     await runMatcher();
 
     expect(findErc20Transfers).not.toHaveBeenCalled();
     expect(findNativeTransfers).not.toHaveBeenCalled();
-    expect(TransferModel.updateOne).not.toHaveBeenCalled();
+    expect(transferRepository.markMatched).not.toHaveBeenCalled();
   });
 
   it('marks status=matched and stores EVM details when an ERC-20 transfer is found', async () => {
-    mockEligible([makeRecord()]);
+    vi.mocked(transferRepository.findEligibleForMatching).mockResolvedValue([makeRecord()] as never);
     vi.mocked(findErc20Transfers).mockResolvedValue(MOCK_EVM_MATCH);
 
     await runMatcher();
 
     expect(findErc20Transfers).toHaveBeenCalledTimes(1);
     expect(findNativeTransfers).not.toHaveBeenCalled();
-
-    expect(TransferModel.updateOne).toHaveBeenCalledWith(
-      { _id: 'mock-id-001' },
-      expect.objectContaining({
-        $set: expect.objectContaining({
-          status: 'matched',
-          evmTxHash: '0xevm-match-hash',
-          evmBlockNumber: 12345,
-        }),
-      }),
+    expect(transferRepository.markMatched).toHaveBeenCalledWith(
+      'mock-id-001',
+      '0xevm-match-hash',
+      new Date(1_700_000_000_000),
+      12345,
     );
   });
 
   it('routes to findNativeTransfers for HYPE (no evmTokenAddress)', async () => {
-    mockEligible([makeRecord({ tokenSymbol: 'HYPE', evmTokenAddress: null })]);
-    // Provide a second distinct mock for the exclusion query
+    vi.mocked(transferRepository.findEligibleForMatching).mockResolvedValue(
+      [makeRecord({ tokenSymbol: 'HYPE', evmTokenAddress: null })] as never,
+    );
     vi.mocked(findNativeTransfers).mockResolvedValue(MOCK_EVM_MATCH);
 
     await runMatcher();
@@ -127,76 +117,45 @@ describe('runMatcher', () => {
   });
 
   it('increments retryCount when no EVM match is found', async () => {
-    mockEligible([makeRecord({ retryCount: 1 })]);
+    vi.mocked(transferRepository.findEligibleForMatching).mockResolvedValue(
+      [makeRecord({ retryCount: 1 })] as never,
+    );
     vi.mocked(findErc20Transfers).mockResolvedValue(null);
 
     await runMatcher();
 
-    expect(TransferModel.updateOne).toHaveBeenCalledWith(
-      { _id: 'mock-id-001' },
-      expect.objectContaining({
-        $set: expect.objectContaining({
-          retryCount: 2,
-        }),
-      }),
-    );
-    // status should NOT be changed to failed yet (retryCount 2 < maxRetries 3)
-    const setPayload = vi.mocked(TransferModel.updateOne).mock.calls[0][1] as {
-      $set: Record<string, unknown>;
-    };
-    expect(setPayload.$set.status).toBeUndefined();
+    expect(transferRepository.markRetried).toHaveBeenCalledWith('mock-id-001', 1);
   });
 
-  it('sets status=failed when retryCount reaches maxRetries', async () => {
-    // retryCount is already at maxRetries - 1; next attempt should exhaust
-    mockEligible([makeRecord({ retryCount: 2 })]);
+  it('calls markRetried when retryCount reaches maxRetries (exhaustion handled by repository)', async () => {
+    // retryCount is already at maxRetries - 1; the repository will mark it failed
+    vi.mocked(transferRepository.findEligibleForMatching).mockResolvedValue(
+      [makeRecord({ retryCount: 2 })] as never,
+    );
     vi.mocked(findErc20Transfers).mockResolvedValue(null);
 
     await runMatcher();
 
-    expect(TransferModel.updateOne).toHaveBeenCalledWith(
-      { _id: 'mock-id-001' },
-      expect.objectContaining({
-        $set: expect.objectContaining({
-          retryCount: 3,
-          status: 'failed',
-        }),
-      }),
-    );
+    expect(transferRepository.markRetried).toHaveBeenCalledWith('mock-id-001', 2);
   });
 
   it('force-exhausts retries immediately when the HL amount cannot be parsed', async () => {
-    // 'not-a-number' will cause ethers.parseUnits to throw
-    mockEligible([makeRecord({ amount: 'not-a-number', retryCount: 0 })]);
+    vi.mocked(transferRepository.findEligibleForMatching).mockResolvedValue(
+      [makeRecord({ amount: 'not-a-number', retryCount: 0 })] as never,
+    );
 
     await runMatcher();
 
-    // The EVM search should never be attempted
     expect(findErc20Transfers).not.toHaveBeenCalled();
     expect(findNativeTransfers).not.toHaveBeenCalled();
-
-    // The record should be immediately marked failed
-    expect(TransferModel.updateOne).toHaveBeenCalledWith(
-      { _id: 'mock-id-001' },
-      expect.objectContaining({
-        $set: expect.objectContaining({
-          status: 'failed',
-        }),
-      }),
-    );
+    expect(transferRepository.markRetried).toHaveBeenCalledWith('mock-id-001', 0, true);
   });
 
   it('passes already-claimed EVM tx hashes as exclusion set to the search', async () => {
-    const record = makeRecord();
-
-    vi.mocked(TransferModel.find)
-      .mockReturnValueOnce({
-        sort: vi.fn().mockReturnValue({ limit: vi.fn().mockResolvedValue([record]) }),
-      } as never)
-      .mockReturnValueOnce({
-        distinct: vi.fn().mockResolvedValue(['0xalready-claimed-hash']),
-      } as never);
-
+    vi.mocked(transferRepository.findEligibleForMatching).mockResolvedValue([makeRecord()] as never);
+    vi.mocked(transferRepository.findUsedEvmHashes).mockResolvedValue(
+      new Set(['0xalready-claimed-hash']),
+    );
     vi.mocked(findErc20Transfers).mockResolvedValue(null);
 
     await runMatcher();

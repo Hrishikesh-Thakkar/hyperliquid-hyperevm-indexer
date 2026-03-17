@@ -21,6 +21,23 @@ vi.mock('../models/transfer.model', () => ({
   },
 }));
 
+// Mock processor state so /health tests can inspect it
+vi.mock('../processor', () => ({
+  processorState: {
+    indexerLastRunAt: null,
+    indexerLastError: null,
+    matcherLastRunAt: null,
+    matcherLastError: null,
+  },
+}));
+
+// Mock transfer repository so /metrics doesn't hit the DB
+vi.mock('../repositories/transfer.repository', () => ({
+  transferRepository: {
+    countByStatus: vi.fn().mockResolvedValue({ pending: 0, matched: 0, failed: 0 }),
+  },
+}));
+
 import { buildServer } from './server';
 import { TransferModel } from '../models/transfer.model';
 import type { FastifyInstance } from 'fastify';
