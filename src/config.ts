@@ -50,6 +50,12 @@ export const config = {
 
   /** Minimum wait between matcher retries for the same record (ms) */
   retryDelayMs: parseInt(process.env.RETRY_DELAY_MS ?? '120000', 10),
+
+  /** Maximum requests per window per IP (0 = disabled) */
+  rateLimitMax: parseInt(process.env.RATE_LIMIT_MAX ?? '100', 10),
+
+  /** Rate-limit sliding window duration (ms) */
+  rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10),
 } as const;
 
 const ETH_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -68,6 +74,8 @@ export function validateConfig(): void {
     ['EVM_SEARCH_WINDOW_MS', config.evmSearchWindowMs],
     ['MAX_RETRIES', config.maxRetries],
     ['RETRY_DELAY_MS', config.retryDelayMs],
+    ['RATE_LIMIT_MAX', config.rateLimitMax],
+    ['RATE_LIMIT_WINDOW_MS', config.rateLimitWindowMs],
   ];
 
   for (const [name, value] of numericFields) {

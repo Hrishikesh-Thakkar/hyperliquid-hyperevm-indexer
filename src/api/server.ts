@@ -1,5 +1,7 @@
+import crypto from 'node:crypto';
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import rateLimit from '@fastify/rate-limit';
 import mongoose from 'mongoose';
 import { transferRoutes } from './routes/transfers';
 import { config } from '../config';
@@ -15,9 +17,31 @@ export function buildServer(): FastifyInstance {
           ? { target: 'pino-pretty', options: { colorize: true } }
           : undefined,
     },
+    // Use client-supplied x-request-id for distributed tracing, or generate a UUID.
+    // Fastify's logger automatically includes this as `reqId` in all request-scoped logs.
+    genReqId: (req) =>
+      (req.headers['x-request-id'] as string) ?? crypto.randomUUID(),
+  });
+
+  // Echo the correlation ID back in every response
+  fastify.addHook('onSend', async (req, reply) => {
+    void reply.header('x-request-id', req.id);
   });
 
   void fastify.register(cors, { origin: '*' });
+
+  // Rate-limit public endpoints — skip infrastructure routes (/health, /metrics)
+  if (config.rateLimitMax > 0) {
+    void fastify.register(rateLimit, {
+      max: config.rateLimitMax,
+      timeWindow: config.rateLimitWindowMs,
+      allowList: (_req, _key) => {
+        const url = _req.url;
+        return url === '/health' || url === '/metrics';
+      },
+    });
+  }
+
   fastify.register(transferRoutes);
 
   fastify.setErrorHandler((error, _req, reply) => {

@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@fastify/cors": "^8.5.0",
+    "@fastify/rate-limit": "^9.1.0",
     "@nktkas/hyperliquid": "^0.31.0",
     "@typegoose/typegoose": "^12.21.0",
     "dotenv": "^16.6.1",
