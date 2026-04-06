@@ -10,7 +10,7 @@ import { setupMongo, teardownMongo, clearCollections } from './setup';
 import { TransferModel } from '../../src/models/transfer.model';
 import { TransferRepository } from '../../src/repositories/transfer.repository';
 
-const repo = new TransferRepository();
+const repo = new TransferRepository(5, 120_000);
 
 beforeAll(async () => {
   await setupMongo();

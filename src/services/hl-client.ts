@@ -2,13 +2,12 @@ import { HttpTransport, InfoClient } from '@nktkas/hyperliquid';
 import { config } from '../config';
 
 /**
- * Shared Hyperliquid InfoClient instance.
- *
- * HttpTransport uses the Hyperliquid REST API under the hood.
- * The apiUrl is sourced from config so it can be overridden for testnet.
+ * Creates a Hyperliquid InfoClient with the given API URL.
  */
-const transport = new HttpTransport({
-  apiUrl: config.hlApiUrl,
-});
+export function createInfoClient(apiUrl: string): InfoClient {
+  const transport = new HttpTransport({ apiUrl });
+  return new InfoClient({ transport });
+}
 
-export const infoClient = new InfoClient({ transport });
+/** Default shared InfoClient — used when DI context is not available. */
+export const infoClient = createInfoClient(config.hlApiUrl);

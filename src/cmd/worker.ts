@@ -9,26 +9,53 @@
 import 'reflect-metadata';
 
 import { connectDb, disconnectDb } from '../db';
-import { initTokenCache } from '../services/token-cache';
-import { checkEvmConnectivity } from '../services/hyperevm';
-import { startProcessor, stopProcessor } from '../processor';
 import { validateConfig } from '../config';
-import { logger } from '../logger';
+import { createAppContext } from '../context';
+import { createIndexer } from '../processor/indexer';
+import { createMatcher } from '../processor/matcher';
+import { createProcessor } from '../processor';
 
 async function main(): Promise<void> {
   validateConfig();
-  logger.info('[Worker] Starting worker-only service (indexer + matcher)');
+  const ctx = createAppContext();
+  ctx.logger.info('[Worker] Starting worker-only service (indexer + matcher)');
 
-  await connectDb();
-  await checkEvmConnectivity();
-  await initTokenCache();
-  await startProcessor();
+  await connectDb(ctx.config.mongoUri, ctx.logger);
+  await ctx.evmService.checkConnectivity();
+  await ctx.tokenCache.init();
 
-  logger.info('[Worker] Running — no HTTP server in this process');
+  const indexer = createIndexer({
+    config: ctx.config,
+    logger: ctx.logger,
+    hlClient: ctx.hlClient,
+    tokenCache: ctx.tokenCache,
+    transferRepository: ctx.transferRepository,
+    metrics: ctx.metrics,
+  });
+
+  const matcher = createMatcher({
+    logger: ctx.logger,
+    evmService: ctx.evmService,
+    transferRepository: ctx.transferRepository,
+    metrics: ctx.metrics,
+  });
+
+  const processor = createProcessor({
+    config: ctx.config,
+    logger: ctx.logger,
+    indexer,
+    matcher,
+    transferRepository: ctx.transferRepository,
+    metrics: ctx.metrics,
+  });
+
+  await processor.start();
+
+  ctx.logger.info('[Worker] Running — no HTTP server in this process');
 
   const shutdown = async (signal: string): Promise<void> => {
-    logger.info({ signal }, '[Worker] Shutting down');
-    stopProcessor();
+    ctx.logger.info({ signal }, '[Worker] Shutting down');
+    processor.stop();
     await disconnectDb();
     process.exit(0);
   };
@@ -38,6 +65,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  logger.fatal({ err }, '[Worker] Fatal startup error');
+  console.error('[Worker] Fatal startup error', err);
   process.exit(1);
 });

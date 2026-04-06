@@ -2,36 +2,64 @@
 import 'reflect-metadata';
 
 import { connectDb, disconnectDb } from './db';
-import { initTokenCache } from './services/token-cache';
-import { checkEvmConnectivity } from './services/hyperevm';
-import { startProcessor, stopProcessor } from './processor';
-import { startApiServer, stopApiServer } from './api/server';
 import { validateConfig } from './config';
-import { logger } from './logger';
+import { createAppContext } from './context';
+import { createIndexer } from './processor/indexer';
+import { createMatcher } from './processor/matcher';
+import { createProcessor } from './processor';
+import { buildServer } from './api/server';
 
 async function main(): Promise<void> {
   validateConfig();
-  logger.info('[App] Starting Hyperliquid → HyperEVM Indexer');
+  const ctx = createAppContext();
+  ctx.logger.info('[App] Starting Hyperliquid → HyperEVM Indexer');
 
-  // Fail fast if external dependencies are unreachable
-  await connectDb();
-  await checkEvmConnectivity();
-  await initTokenCache();
+  await connectDb(ctx.config.mongoUri, ctx.logger);
+  await ctx.evmService.checkConnectivity();
+  await ctx.tokenCache.init();
 
-  await startProcessor();
-  await startApiServer();
+  const indexer = createIndexer({
+    config: ctx.config,
+    logger: ctx.logger,
+    hlClient: ctx.hlClient,
+    tokenCache: ctx.tokenCache,
+    transferRepository: ctx.transferRepository,
+    metrics: ctx.metrics,
+  });
 
-  logger.info('[App] All services running. Press Ctrl+C to stop.');
+  const matcher = createMatcher({
+    logger: ctx.logger,
+    evmService: ctx.evmService,
+    transferRepository: ctx.transferRepository,
+    metrics: ctx.metrics,
+  });
 
-  // ---------------------------------------------------------------------------
-  // Graceful shutdown — finish the current work items, close connections cleanly
-  // ---------------------------------------------------------------------------
+  const processor = createProcessor({
+    config: ctx.config,
+    logger: ctx.logger,
+    indexer,
+    matcher,
+    transferRepository: ctx.transferRepository,
+    metrics: ctx.metrics,
+  });
+
+  await processor.start();
+
+  const server = buildServer({
+    config: ctx.config,
+    processorState: processor.state,
+    metricsRegistry: ctx.metricsRegistry,
+  });
+  await server.listen({ port: ctx.config.apiPort, host: '0.0.0.0' });
+
+  ctx.logger.info('[App] All services running. Press Ctrl+C to stop.');
+
   const shutdown = async (signal: string): Promise<void> => {
-    logger.info({ signal }, '[App] Shutting down gracefully');
-    stopProcessor();          // stops scheduling new runs; in-progress runs complete
-    await stopApiServer();    // stops accepting new HTTP requests
+    ctx.logger.info({ signal }, '[App] Shutting down gracefully');
+    processor.stop();
+    await server.close();
     await disconnectDb();
-    logger.info('[App] Shutdown complete');
+    ctx.logger.info('[App] Shutdown complete');
     process.exit(0);
   };
 
@@ -40,6 +68,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  logger.fatal({ err }, '[App] Fatal startup error');
+  console.error('[App] Fatal startup error', err);
   process.exit(1);
 });

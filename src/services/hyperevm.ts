@@ -1,61 +1,25 @@
-import { config } from '../config';
-import { logger } from '../logger';
-import {
-  createPublicClient,
-  http,
-  getAddress,
-  hexToBigInt,
-  keccak256,
-  numberToHex,
-  padHex,
-  stringToBytes,
-} from 'viem';
-import { hyperliquid } from 'viem/chains';
-
-// ---------------------------------------------------------------------------
-// Provider setup
-// ---------------------------------------------------------------------------
-
-/**
- * Shared viem public client for the HyperEVM network.
- * Connection is lazy — no requests are made until a method is called.
- */
-export const hyperEvmProvider = createPublicClient({
-  chain: hyperliquid,
-  transport: http(config.hyperEvmRpcUrl, { timeout: 30_000 }),
-});
-
-// ---------------------------------------------------------------------------
-// Startup check
-// ---------------------------------------------------------------------------
-
-/**
- * Verifies that the HyperEVM RPC is reachable by fetching the latest block number.
- * Called once at startup so the app fails fast with a clear error rather than
- * silently failing to match transfers later.
- */
-export async function checkEvmConnectivity(): Promise<void> {
-  const blockNumber = await hyperEvmProvider.getBlockNumber();
-  logger.info({ blockNumber: Number(blockNumber), rpcUrl: config.hyperEvmRpcUrl }, '[HyperEVM] RPC connectivity verified');
-}
+import { ethers } from 'ethers';
+import type { Logger } from '../logger';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const ERC20_TRANSFER_TOPIC = keccak256(
-  stringToBytes('Transfer(address,address,uint256)'),
-);
-
-const ERC20_WITHDRAW_TOPIC = keccak256(
-  stringToBytes('Withdraw(address,uint256)'),
-);
+const ERC20_TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
+const ERC20_WITHDRAW_TOPIC = ethers.id('Withdraw(address,uint256)');
 
 /**
  * Maximum blocks per eth_getLogs request.
- * Some RPC providers cap this; 2000 is a conservative limit.
+ * Some RPC providers cap this; 200 is a conservative limit.
  */
 const MAX_LOG_RANGE = 200;
+
+/**
+ * Extra blocks added beyond the linear extrapolation for toBlock.
+ * Accounts for block time variance over the search window — 120 blocks covers
+ * roughly ±20% variance on a 10-minute window without over-scanning.
+ */
+const TO_BLOCK_BUFFER = 120;
 
 // ---------------------------------------------------------------------------
 // Result type
@@ -72,258 +36,236 @@ export interface EvmTransferMatch {
   amount: bigint;
 }
 
+type RawLog = { blockNumber: string; data: string; transactionHash: string; topics: string[] };
+
 // ---------------------------------------------------------------------------
-// Block range helpers
+// Service class
 // ---------------------------------------------------------------------------
 
 /**
- * Finds the number of the first block whose timestamp >= targetSec using binary search.
+ * Encapsulates all HyperEVM RPC interactions for block search, ERC-20 log
+ * queries, and native transfer scanning.
  *
- * `lo` and `hi` bound the search range — callers pass a linear estimate to seed
- * these tightly, cutting the number of iterations from ~log₂(chainLength) to ~log₂(seedRange).
- *
- * Accuracy: always within 1 block of the true answer regardless of chain history.
- * Cost: O(log(hi - lo)) RPC calls, typically 10–15 when seeded from a linear estimate.
+ * Dependencies are injected via the constructor, making the service testable
+ * with a mock provider.
  */
-async function findBlockByTimestamp(
-  targetSec: number,
-  lo: number,
-  hi: number,
-): Promise<number> {
-  while (lo < hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    const block = await hyperEvmProvider.getBlock({ blockNumber: BigInt(mid) });
+export class HyperEvmService {
+  constructor(
+    private provider: ethers.JsonRpcProvider,
+    private logger: Logger,
+    private evmSearchWindowMs: number,
+  ) {}
 
-    if (!block) {
-      hi = mid - 1;
-      continue;
-    }
-
-    const blockTimestamp = Number(block.timestamp);
-    if (blockTimestamp < targetSec) {
-      lo = mid + 1;
-    } else {
-      hi = mid;
-    }
+  /**
+   * Verifies that the HyperEVM RPC is reachable by fetching the latest block number.
+   * Called once at startup so the app fails fast with a clear error.
+   */
+  async checkConnectivity(): Promise<void> {
+    const blockNumber = await this.provider.getBlockNumber();
+    this.logger.info({ blockNumber }, '[HyperEVM] RPC connectivity verified');
   }
 
-  return lo;
-}
+  // -------------------------------------------------------------------------
+  // ERC-20 transfer resolution
+  // -------------------------------------------------------------------------
 
-/**
- * Extra blocks added beyond the linear extrapolation for toBlock.
- * Accounts for block time variance over the search window — 120 blocks covers
- * roughly ±20% variance on a 10-minute window without over-scanning.
- */
-const TO_BLOCK_BUFFER = 120;
+  /**
+   * Searches HyperEVM for the first unclaimed ERC-20 Transfer event matching a
+   * known bridge transfer.
+   *
+   * Scans the block range chunk by chunk (MAX_LOG_RANGE blocks at a time) and
+   * returns the first match whose txHash is not in `excludeTxHashes`, or null.
+   */
+  async findErc20Transfers(
+    tokenContract: string,
+    fromAddress: string,
+    toAddress: string,
+    amount: bigint,
+    afterTimestampMs: number,
+    windowMs = this.evmSearchWindowMs,
+    excludeTxHashes: Set<string> = new Set(),
+  ): Promise<EvmTransferMatch | null> {
+    const { fromBlock, toBlock } = await this.getBlockRange(afterTimestampMs, windowMs);
 
-/**
- * Computes a [fromBlock, toBlock] range for a given time window.
- *
- * Strategy:
- *   1. Binary-search the full chain for fromBlock — exact, no block time assumptions.
- *   2. Fetch fromBlock to get its confirmed timestamp as a local anchor.
- *   3. Linearly extrapolate toBlock from that anchor using the window duration.
- *
- * Extrapolating toBlock from a nearby confirmed anchor (step 3) is safe because
- * the delta is small (windowMs). Any block time variance over a short window is
- * absorbed by TO_BLOCK_BUFFER. This saves one full binary search (~23 RPC calls).
- */
-async function getBlockRange(
-  afterTimestampMs: number,
-  windowMs: number,
-): Promise<{ fromBlock: number; toBlock: number }> {
-  const latestBlockNumber = await hyperEvmProvider.getBlockNumber();
-  const latest = await hyperEvmProvider.getBlock({
-    blockNumber: latestBlockNumber,
-  });
-  if (!latest) throw new Error('[HyperEVM] Could not fetch latest block');
+    const fromTopic = ethers.zeroPadValue(fromAddress, 32);
+    const toTopic   = ethers.zeroPadValue(toAddress,   32);
 
-  const latestNum = Number(latestBlockNumber);
-  const fromBlock = await findBlockByTimestamp(
-    Math.floor(afterTimestampMs / 1000),
-    0,
-    latestNum,
-  );
-
-  const fromBlockData = await hyperEvmProvider.getBlock({
-    blockNumber: BigInt(fromBlock),
-  });
-  const anchorTimestamp = fromBlockData
-    ? Number(fromBlockData.timestamp)
-    : Math.floor(afterTimestampMs / 1000);
-
-  const latestTimestamp = Number(latest.timestamp);
-  const elapsedSec = latestTimestamp - anchorTimestamp;
-  const elapsedBlocks = latestNum - fromBlock;
-  const avgBlockTimeSec = elapsedBlocks > 0 ? elapsedSec / elapsedBlocks : 1;
-
-  const windowSec = windowMs / 1000;
-  const toBlock = Math.min(
-    latestNum,
-    fromBlock + Math.ceil(windowSec / avgBlockTimeSec) + TO_BLOCK_BUFFER,
-  );
-
-  return { fromBlock, toBlock };
-}
-
-// ---------------------------------------------------------------------------
-// ERC-20 transfer resolution
-// ---------------------------------------------------------------------------
-
-/**
- * Searches HyperEVM for the first unclaimed ERC-20 Transfer event matching a
- * known bridge transfer.
- *
- * Scans the block range chunk by chunk (MAX_LOG_RANGE blocks at a time) and
- * returns the first match whose txHash is not in `excludeTxHashes`, or null if
- * no unclaimed match is found.  Early exit means we stop scanning as soon as
- * we find a candidate — we do not scan the full window when a match appears early.
- *
- * Matching criteria:
- *   - emitted by `tokenContract`
- *   - `from` field equals `fromAddress` (exact topic filter)
- *   - `to` field equals `toAddress` (exact topic filter)
- *   - `value` equals `amount` (exact bigint match)
- *
- * The block range is split into MAX_LOG_RANGE-sized chunks to stay within
- * RPC provider limits.
- */
-export async function findErc20Transfers(
-  tokenContract: string,
-  fromAddress: string,
-  toAddress: string,
-  amount: bigint,
-  afterTimestampMs: number,
-  windowMs = config.evmSearchWindowMs,
-  excludeTxHashes: Set<string> = new Set(),
-): Promise<EvmTransferMatch | null> {
-  const { fromBlock, toBlock } = await getBlockRange(afterTimestampMs, windowMs);
-
-  const fromTopic = padHex(fromAddress as `0x${string}`, { size: 32 });
-  const toTopic   = padHex(toAddress   as `0x${string}`, { size: 32 });
-
-  type RawLog = { blockNumber: string; data: string; transactionHash: string; topics: string[] };
-
-  for (let start = fromBlock; start <= toBlock; start += MAX_LOG_RANGE) {
-    const end = Math.min(start + MAX_LOG_RANGE - 1, toBlock);
-    const transferLogs = await hyperEvmProvider.request({
-      method: 'eth_getLogs',
-      params: [
+    for (let start = fromBlock; start <= toBlock; start += MAX_LOG_RANGE) {
+      const end = Math.min(start + MAX_LOG_RANGE - 1, toBlock);
+      const transferLogs = await this.provider.send('eth_getLogs', [
         {
-          address: getAddress(tokenContract),
+          address: ethers.getAddress(tokenContract),
           topics: [ERC20_TRANSFER_TOPIC, fromTopic, toTopic],
-          fromBlock: numberToHex(BigInt(start)),
-          toBlock: numberToHex(BigInt(end)),
+          fromBlock: ethers.toBeHex(start),
+          toBlock: ethers.toBeHex(end),
         },
-      ],
-    }) as RawLog[];
+      ]) as RawLog[];
 
-    const candidates = transferLogs.filter(
-      (log) =>
-        hexToBigInt(log.data as `0x${string}`) === amount &&
-        !excludeTxHashes.has(log.transactionHash),
-    );
-    //Assumption made that the time taken to bridge is less than 2 blocks. During testing this assumption was found to be true for a sample set of transfers.
-    const withdrawLogs = await hyperEvmProvider.request({
-      method: 'eth_getLogs',
-      params: [
+      const candidates = transferLogs.filter(
+        (log) =>
+          BigInt(log.data) === amount &&
+          !excludeTxHashes.has(log.transactionHash),
+      );
+
+      // Assumption: bridge settles within 2 blocks of the Transfer event
+      const withdrawLogs = await this.provider.send('eth_getLogs', [
         {
-          address: getAddress(tokenContract),
+          address: ethers.getAddress(tokenContract),
           topics: [ERC20_WITHDRAW_TOPIC, toTopic],
-          fromBlock: numberToHex(BigInt(start)),
-          toBlock: numberToHex(BigInt(start + 2)),
+          fromBlock: ethers.toBeHex(start),
+          toBlock: ethers.toBeHex(start + 2),
         },
-      ],
-    }) as RawLog[];
+      ]) as RawLog[];
 
-    const withdrawCandidates = withdrawLogs.filter(
-      (log) =>
-        hexToBigInt(log.data as `0x${string}`) === amount &&
-        !excludeTxHashes.has(log.transactionHash),
-    );
-    const allCandidates = [...candidates, ...withdrawCandidates];
-    if (allCandidates.length === 0) continue;
+      const withdrawCandidates = withdrawLogs.filter(
+        (log) =>
+          BigInt(log.data) === amount &&
+          !excludeTxHashes.has(log.transactionHash),
+      );
 
-    // Fetch the block timestamp for the first candidate's block only
-    const firstLog = allCandidates[0];
-    const blockNum = Number(hexToBigInt(firstLog.blockNumber as `0x${string}`));
-    const block = await hyperEvmProvider.getBlock({ blockNumber: BigInt(blockNum) });
-    const timestamp = block ? Number(block.timestamp) * 1000 : 0;
+      const allCandidates = [...candidates, ...withdrawCandidates];
+      if (allCandidates.length === 0) continue;
 
-    const topic1 = firstLog.topics?.[1];
-    const from =
-      topic1 && topic1.length >= 40
-        ? getAddress(('0x' + topic1.slice(-40)) as `0x${string}`)
-        : '';
+      const firstLog = allCandidates[0];
+      const blockNum = Number(BigInt(firstLog.blockNumber));
+      const block = await this.provider.getBlock(blockNum);
+      const timestamp = block ? block.timestamp * 1000 : 0;
 
-    return {
-      txHash: firstLog.transactionHash,
-      blockNumber: blockNum,
-      timestamp,
-      from,
-      to: toAddress,
-      amount: hexToBigInt(firstLog.data as `0x${string}`),
-    };
-  }
-
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Native HYPE transfer resolution
-// ---------------------------------------------------------------------------
-
-/**
- * Searches HyperEVM for the first unclaimed native HYPE transfer to `toAddress`
- * matching `amount`.
- *
- * Returns the first match whose txHash is not in `excludeTxHashes`, or null if
- * no unclaimed match is found in the block window.  Scanning stops immediately
- * on the first unclaimed candidate.
- *
- * Native transfers do not emit ERC-20 Transfer logs, so we must scan individual
- * blocks and inspect transaction values.  This is more expensive than log queries.
- *
- * Future improvement: if HyperEVM exposes a bridge system precompile that emits
- * events for native transfers, replace this with a getLogs call.
- */
-export async function findNativeTransfers(
-  fromAddress: string,
-  toAddress: string,
-  amount: bigint,
-  afterTimestampMs: number,
-  windowMs = config.evmSearchWindowMs,
-  excludeTxHashes: Set<string> = new Set(),
-): Promise<EvmTransferMatch | null> {
-  const { fromBlock, toBlock } = await getBlockRange(afterTimestampMs, windowMs);
-  const normalizedFrom = fromAddress.toLowerCase();
-  const normalizedTo = toAddress.toLowerCase();
-
-  for (let blockNum = fromBlock; blockNum <= toBlock; blockNum++) {
-    const block = await hyperEvmProvider.getBlock({
-      blockNumber: BigInt(blockNum),
-      includeTransactions: true,
-    });
-    if (!block || !block.transactions) continue;
-
-    for (const tx of block.transactions) {
-      if (typeof tx === 'string') continue;
-      if (tx.from?.toLowerCase() !== normalizedFrom) continue;
-      if (tx.to?.toLowerCase() !== normalizedTo) continue;
-      if (tx.value !== amount) continue;
-      if (excludeTxHashes.has(tx.hash)) continue;
+      const topic1 = firstLog.topics?.[1];
+      const from =
+        topic1 && topic1.length >= 40
+          ? ethers.getAddress('0x' + topic1.slice(-40))
+          : '';
 
       return {
-        txHash: tx.hash,
+        txHash: firstLog.transactionHash,
         blockNumber: blockNum,
-        timestamp: Number(block.timestamp) * 1000,
-        from: tx.from!,
-        to: tx.to!,
-        amount: tx.value ?? 0n,
+        timestamp,
+        from,
+        to: toAddress,
+        amount: BigInt(firstLog.data),
       };
     }
+
+    return null;
   }
 
-  return null;
+  // -------------------------------------------------------------------------
+  // Native HYPE transfer resolution
+  // -------------------------------------------------------------------------
+
+  /**
+   * Searches HyperEVM for the first unclaimed native HYPE transfer matching
+   * the given criteria.
+   *
+   * Native transfers do not emit ERC-20 Transfer logs, so we must scan
+   * individual blocks and inspect transaction values.
+   */
+  async findNativeTransfers(
+    fromAddress: string,
+    toAddress: string,
+    amount: bigint,
+    afterTimestampMs: number,
+    windowMs = this.evmSearchWindowMs,
+    excludeTxHashes: Set<string> = new Set(),
+  ): Promise<EvmTransferMatch | null> {
+    const { fromBlock, toBlock } = await this.getBlockRange(afterTimestampMs, windowMs);
+    const normalizedFrom = fromAddress.toLowerCase();
+    const normalizedTo = toAddress.toLowerCase();
+
+    for (let blockNum = fromBlock; blockNum <= toBlock; blockNum++) {
+      const block = await this.provider.getBlock(blockNum, true);
+      if (!block || !block.prefetchedTransactions) continue;
+
+      for (const tx of block.prefetchedTransactions) {
+        if (tx.from?.toLowerCase() !== normalizedFrom) continue;
+        if (tx.to?.toLowerCase() !== normalizedTo) continue;
+        if (tx.value !== amount) continue;
+        if (excludeTxHashes.has(tx.hash)) continue;
+
+        return {
+          txHash: tx.hash,
+          blockNumber: blockNum,
+          timestamp: block.timestamp * 1000,
+          from: tx.from!,
+          to: tx.to!,
+          amount: tx.value ?? 0n,
+        };
+      }
+    }
+
+    return null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Block range helpers (private)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Finds the first block whose timestamp >= targetSec using binary search.
+   */
+  private async findBlockByTimestamp(
+    targetSec: number,
+    lo: number,
+    hi: number,
+  ): Promise<number> {
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      const block = await this.provider.getBlock(mid);
+
+      if (!block) {
+        hi = mid - 1;
+        continue;
+      }
+
+      if (block.timestamp < targetSec) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+
+    return lo;
+  }
+
+  /**
+   * Computes a [fromBlock, toBlock] range for a given time window.
+   *
+   * Strategy:
+   *   1. Binary-search for fromBlock (exact).
+   *   2. Fetch fromBlock to anchor a local timestamp.
+   *   3. Linearly extrapolate toBlock from that anchor.
+   */
+  private async getBlockRange(
+    afterTimestampMs: number,
+    windowMs: number,
+  ): Promise<{ fromBlock: number; toBlock: number }> {
+    const latestBlockNumber = await this.provider.getBlockNumber();
+    const latest = await this.provider.getBlock(latestBlockNumber);
+    if (!latest) throw new Error('[HyperEVM] Could not fetch latest block');
+
+    const fromBlock = await this.findBlockByTimestamp(
+      Math.floor(afterTimestampMs / 1000),
+      0,
+      latestBlockNumber,
+    );
+
+    const fromBlockData = await this.provider.getBlock(fromBlock);
+    const anchorTimestamp = fromBlockData
+      ? fromBlockData.timestamp
+      : Math.floor(afterTimestampMs / 1000);
+
+    const latestTimestamp = latest.timestamp;
+    const elapsedSec = latestTimestamp - anchorTimestamp;
+    const elapsedBlocks = latestBlockNumber - fromBlock;
+    const avgBlockTimeSec = elapsedBlocks > 0 ? elapsedSec / elapsedBlocks : 1;
+
+    const windowSec = windowMs / 1000;
+    const toBlock = Math.min(
+      latestBlockNumber,
+      fromBlock + Math.ceil(windowSec / avgBlockTimeSec) + TO_BLOCK_BUFFER,
+    );
+
+    return { fromBlock, toBlock };
+  }
 }

@@ -10,11 +10,6 @@ const EVM_TX_BASE = 'https://hyperevmscan.io/tx/';
 
 // ---------------------------------------------------------------------------
 // Response serialiser
-//
-// Converts a raw Mongoose lean document into the public API shape:
-//   - adds computed explorer URL fields
-//   - strips MongoDB/Mongoose internals (_id, __v, createdAt, updatedAt)
-//   - strips internal bookkeeping fields (retryCount, lastRetryAt, decimals)
 // ---------------------------------------------------------------------------
 
 type LeanTransfer = {
@@ -57,27 +52,66 @@ function toTransferResponse(doc: LeanTransfer) {
 }
 
 // ---------------------------------------------------------------------------
-// Query / param schemas (used by Fastify for validation + serialisation)
+// JSON schemas for OpenAPI + validation
 // ---------------------------------------------------------------------------
 
 const walletParams = {
   type: 'object',
-  properties: { wallet: { type: 'string' } },
+  properties: { wallet: { type: 'string', description: 'Wallet address (sender or receiver)' } },
   required: ['wallet'],
 } as const;
 
 const hashParams = {
   type: 'object',
-  properties: { hash: { type: 'string' } },
+  properties: { hash: { type: 'string', description: 'Hyperliquid or HyperEVM transaction hash' } },
   required: ['hash'],
 } as const;
 
 const paginationQuery = {
   type: 'object',
   properties: {
-    limit:  { type: 'integer', minimum: 1, maximum: 200, default: 50 },
-    offset: { type: 'integer', minimum: 0, default: 0 },
-    status: { type: 'string', enum: ['pending', 'matched', 'failed'] },
+    limit:  { type: 'integer', minimum: 1, maximum: 200, default: 50, description: 'Page size' },
+    offset: { type: 'integer', minimum: 0, default: 0, description: 'Records to skip' },
+    status: { type: 'string', enum: ['pending', 'matched', 'failed'], description: 'Filter by transfer status' },
+  },
+} as const;
+
+const transferResponseSchema = {
+  type: 'object',
+  properties: {
+    hlTxHash:        { type: 'string', description: 'Hyperliquid transaction hash' },
+    evmTxHash:       { type: ['string', 'null'], description: 'HyperEVM transaction hash (null if pending)' },
+    hypercoreTxUrl:  { type: 'string', description: 'Flowscan explorer URL for HL tx' },
+    evmTxUrl:        { type: ['string', 'null'], description: 'HyperEVM explorer URL (null if pending)' },
+    sender:          { type: 'string', description: 'Sender wallet address' },
+    receiver:        { type: 'string', description: 'Receiver wallet address' },
+    evmFrom:         { type: 'string', description: 'Bridge system address on EVM side' },
+    hlToken:         { type: 'string', description: 'Hyperliquid token identifier (SYMBOL:tokenId)' },
+    evmTokenAddress: { type: ['string', 'null'], description: 'ERC-20 contract address (null for native HYPE)' },
+    tokenSymbol:     { type: 'string', description: 'Token symbol (e.g. UETH, HYPE, USDC)' },
+    amount:          { type: 'string', description: 'Human-readable decimal amount' },
+    decimals:        { type: 'integer', description: 'EVM token decimals' },
+    hlTimestamp:     { type: 'string', format: 'date-time', description: 'Hyperliquid transaction timestamp' },
+    evmTimestamp:    { type: ['string', 'null'], format: 'date-time', description: 'EVM transaction timestamp' },
+    evmBlockNumber:  { type: ['integer', 'null'], description: 'EVM block number' },
+    status:          { type: 'string', enum: ['pending', 'matched', 'failed'], description: 'Transfer status' },
+  },
+} as const;
+
+const paginatedTransfersResponse = {
+  type: 'object',
+  properties: {
+    total:     { type: 'integer', description: 'Total matching records' },
+    offset:    { type: 'integer', description: 'Current offset' },
+    limit:     { type: 'integer', description: 'Current page size' },
+    transfers: { type: 'array', items: transferResponseSchema },
+  },
+} as const;
+
+const errorResponse = {
+  type: 'object',
+  properties: {
+    error: { type: 'string', description: 'Error message' },
   },
 } as const;
 
@@ -91,15 +125,21 @@ export async function transferRoutes(fastify: FastifyInstance): Promise<void> {
    *
    * Returns all indexed bridge transfers where the wallet is either sender or receiver.
    * Supports pagination and optional status filter.
-   *
-   * Query params:
-   *   limit   (default 50, max 200)
-   *   offset  (default 0)
-   *   status  "pending" | "matched" | "failed"
    */
   fastify.get(
     '/transfers/:wallet',
-    { schema: { params: walletParams, querystring: paginationQuery } },
+    {
+      schema: {
+        tags: ['Transfers'],
+        summary: 'List transfers for a wallet',
+        description: 'Returns paginated bridge transfers where the wallet is sender or receiver.',
+        params: walletParams,
+        querystring: paginationQuery,
+        response: {
+          200: paginatedTransfersResponse,
+        },
+      },
+    },
     async (
       req: FastifyRequest<{
         Params: { wallet: string };
@@ -119,7 +159,7 @@ export async function transferRoutes(fastify: FastifyInstance): Promise<void> {
 
       const [transfers, total] = await Promise.all([
         TransferModel.find(filter)
-          .sort({ hlTimestamp: -1 }) // newest first
+          .sort({ hlTimestamp: -1 })
           .skip(offset)
           .limit(limit)
           .lean(),
@@ -138,7 +178,18 @@ export async function transferRoutes(fastify: FastifyInstance): Promise<void> {
    */
   fastify.get(
     '/transfers/tx/:hash',
-    { schema: { params: hashParams } },
+    {
+      schema: {
+        tags: ['Transfers'],
+        summary: 'Look up a transfer by hash',
+        description: 'Finds a transfer by its Hyperliquid or HyperEVM transaction hash.',
+        params: hashParams,
+        response: {
+          200: transferResponseSchema,
+          404: errorResponse,
+        },
+      },
+    },
     async (
       req: FastifyRequest<{ Params: { hash: string } }>,
       reply: FastifyReply,

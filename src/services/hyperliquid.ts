@@ -1,5 +1,4 @@
-import type { UserNonFundingLedgerUpdatesResponse } from '@nktkas/hyperliquid';
-import { infoClient } from './hl-client';
+import type { UserNonFundingLedgerUpdatesResponse, InfoClient } from '@nktkas/hyperliquid';
 
 // ---------------------------------------------------------------------------
 // Derived types from the SDK response
@@ -34,17 +33,16 @@ export type SendAssetEntry = LedgerEntry & { delta: BridgeDelta };
  * Fetches all non-funding ledger updates for a wallet and returns only those
  * that represent a spot-to-spot bridge transfer (Hyperliquid → HyperEVM).
  *
- * Uses the SDK's `userNonFundingLedgerUpdates` method with an optional
- * `startTime` for cursor-based incremental indexing.
- *
+ * @param hlClient  Hyperliquid InfoClient instance
  * @param wallet    Wallet address to query
  * @param startTime Only return entries at or after this ms epoch (for resumability)
  */
 export async function getBridgeTransfers(
+  hlClient: InfoClient,
   wallet: string,
   startTime?: number,
 ): Promise<SendAssetEntry[]> {
-  const entries = await infoClient.userNonFundingLedgerUpdates({
+  const entries = await hlClient.userNonFundingLedgerUpdates({
     user: wallet as `0x${string}`,
     startTime: startTime ?? undefined,
   });

@@ -1,16 +1,20 @@
-import pino from 'pino';
+import pino, { Logger } from 'pino';
 
 /**
- * Shared application logger (pino).
- *
+ * Creates a pino logger instance.
  * Uses pino-pretty for local development and plain JSON in production.
- * The Fastify server creates its own child logger; this instance is used
- * by processors, services, and DB helpers that run outside the HTTP context.
  */
-export const logger = pino({
-  level: process.env.LOG_LEVEL ?? 'info',
-  transport:
-    process.env.NODE_ENV !== 'production'
-      ? { target: 'pino-pretty', options: { colorize: true } }
-      : undefined,
-});
+export function createLogger(level?: string): Logger {
+  return pino({
+    level: level ?? process.env.LOG_LEVEL ?? 'info',
+    transport:
+      process.env.NODE_ENV !== 'production'
+        ? { target: 'pino-pretty', options: { colorize: true } }
+        : undefined,
+  });
+}
+
+/** Default shared application logger — used when DI context is not available. */
+export const logger = createLogger();
+
+export type { Logger };

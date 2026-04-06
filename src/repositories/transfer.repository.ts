@@ -1,5 +1,4 @@
 import { DocumentType } from '@typegoose/typegoose';
-import { config } from '../config';
 import { TransferModel, TransferRecord, TransferStatus } from '../models/transfer.model';
 
 /**
@@ -8,9 +7,14 @@ import { TransferModel, TransferRecord, TransferStatus } from '../models/transfe
  * Keeping queries in one place means:
  *  - Business logic in processors stays free of query syntax.
  *  - Index / field changes only need updating here.
- *  - Easier to stub in tests.
+ *  - Easier to stub in tests (inject via constructor).
  */
 export class TransferRepository {
+  constructor(
+    private maxRetries: number,
+    private retryDelayMs: number,
+  ) {}
+
   /**
    * Atomically claims up to `limit` pending records for matching.
    *
@@ -29,7 +33,7 @@ export class TransferRepository {
       const record = await TransferModel.findOneAndUpdate(
         {
           status: 'pending',
-          retryCount: { $lt: config.maxRetries },
+          retryCount: { $lt: this.maxRetries },
           $or: [{ nextRetryAt: null }, { nextRetryAt: { $lte: new Date() } }],
         },
         { $set: { nextRetryAt: softLockUntil } },
@@ -84,9 +88,9 @@ export class TransferRepository {
     forceExhaust = false,
   ): Promise<void> {
     const nextCount = currentRetryCount + 1;
-    const exhausted = forceExhaust || nextCount >= config.maxRetries;
+    const exhausted = forceExhaust || nextCount >= this.maxRetries;
     const delayMs = Math.min(
-      config.retryDelayMs * Math.pow(2, currentRetryCount),
+      this.retryDelayMs * Math.pow(2, currentRetryCount),
       30 * 60 * 1000, // cap at 30 minutes
     );
     const nextRetryAt = exhausted ? null : new Date(Date.now() + delayMs);
@@ -128,5 +132,3 @@ export class TransferRepository {
     return base;
   }
 }
-
-export const transferRepository = new TransferRepository();

@@ -9,24 +9,30 @@
 import 'reflect-metadata';
 
 import { connectDb, disconnectDb } from '../db';
-import { initTokenCache } from '../services/token-cache';
-import { startApiServer, stopApiServer } from '../api/server';
 import { validateConfig } from '../config';
-import { logger } from '../logger';
+import { createAppContext } from '../context';
+import { buildServer } from '../api/server';
 
 async function main(): Promise<void> {
   validateConfig();
-  logger.info('[API] Starting API-only service');
+  const ctx = createAppContext();
+  ctx.logger.info('[API] Starting API-only service');
 
-  await connectDb();
-  await initTokenCache();
-  await startApiServer();
+  await connectDb(ctx.config.mongoUri, ctx.logger);
+  await ctx.tokenCache.init();
 
-  logger.info('[API] Listening — indexer/matcher are NOT running in this process');
+  const server = buildServer({
+    config: ctx.config,
+    processorState: null,
+    metricsRegistry: ctx.metricsRegistry,
+  });
+  await server.listen({ port: ctx.config.apiPort, host: '0.0.0.0' });
+
+  ctx.logger.info('[API] Listening — indexer/matcher are NOT running in this process');
 
   const shutdown = async (signal: string): Promise<void> => {
-    logger.info({ signal }, '[API] Shutting down');
-    await stopApiServer();
+    ctx.logger.info({ signal }, '[API] Shutting down');
+    await server.close();
     await disconnectDb();
     process.exit(0);
   };
@@ -36,6 +42,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  logger.fatal({ err }, '[API] Fatal startup error');
+  console.error('[API] Fatal startup error', err);
   process.exit(1);
 });

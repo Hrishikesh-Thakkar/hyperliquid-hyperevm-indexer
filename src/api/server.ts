@@ -2,13 +2,45 @@ import crypto from 'node:crypto';
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
 import mongoose from 'mongoose';
 import { transferRoutes } from './routes/transfers';
-import { config } from '../config';
-import { processorState } from '../processor';
-import { metricsRegistry } from '../metrics';
+import type { ProcessorState } from '../processor';
+import type { Registry } from 'prom-client';
 
-export function buildServer(): FastifyInstance {
+export interface ServerDeps {
+  config: { rateLimitMax: number; rateLimitWindowMs: number; apiPort: number };
+  processorState: ProcessorState | null;
+  metricsRegistry: Registry;
+}
+
+// ---------------------------------------------------------------------------
+// Health endpoint schemas (for OpenAPI documentation)
+// ---------------------------------------------------------------------------
+
+const processorLivenessSchema = {
+  type: ['object', 'null'],
+  properties: {
+    lastRunAt:  { type: ['string', 'null'], format: 'date-time' },
+    lastError:  { type: ['string', 'null'] },
+  },
+} as const;
+
+const healthResponseSchema = {
+  type: 'object',
+  properties: {
+    status:    { type: 'string', enum: ['ok', 'degraded'] },
+    timestamp: { type: 'string', format: 'date-time' },
+    db:        { type: 'string', enum: ['connected', 'disconnected'] },
+    indexer:   processorLivenessSchema,
+    matcher:   processorLivenessSchema,
+  },
+} as const;
+
+export function buildServer(deps: ServerDeps): FastifyInstance {
+  const { config, processorState, metricsRegistry } = deps;
+
   const fastify = Fastify({
     logger: {
       level: process.env.LOG_LEVEL ?? 'info',
@@ -17,8 +49,6 @@ export function buildServer(): FastifyInstance {
           ? { target: 'pino-pretty', options: { colorize: true } }
           : undefined,
     },
-    // Use client-supplied x-request-id for distributed tracing, or generate a UUID.
-    // Fastify's logger automatically includes this as `reqId` in all request-scoped logs.
     genReqId: (req) =>
       (req.headers['x-request-id'] as string) ?? crypto.randomUUID(),
   });
@@ -30,14 +60,33 @@ export function buildServer(): FastifyInstance {
 
   void fastify.register(cors, { origin: '*' });
 
-  // Rate-limit public endpoints — skip infrastructure routes (/health, /metrics)
+  // OpenAPI documentation
+  void fastify.register(swagger, {
+    openapi: {
+      info: {
+        title: 'Hyperliquid HyperEVM Indexer API',
+        description: 'Indexes bridge transfers between Hyperliquid Spot and HyperEVM, correlates with on-chain EVM transactions, and exposes the dataset via REST.',
+        version: '1.1.0',
+      },
+      tags: [
+        { name: 'Transfers', description: 'Bridge transfer queries' },
+        { name: 'Infrastructure', description: 'Health checks and metrics' },
+      ],
+    },
+  });
+
+  void fastify.register(swaggerUi, {
+    routePrefix: '/documentation',
+  });
+
+  // Rate-limit public endpoints — skip infrastructure routes
   if (config.rateLimitMax > 0) {
     void fastify.register(rateLimit, {
       max: config.rateLimitMax,
       timeWindow: config.rateLimitWindowMs,
       allowList: (_req, _key) => {
         const url = _req.url;
-        return url === '/health' || url === '/metrics';
+        return url === '/health' || url === '/metrics' || url.startsWith('/documentation');
       },
     });
   }
@@ -51,29 +100,31 @@ export function buildServer(): FastifyInstance {
 
   /**
    * Health check — returns 200 when all systems are operational, 503 when degraded.
-   *
-   * Checks:
-   *   - MongoDB connection state
-   *   - Whether the indexer and matcher have run recently (liveness, not just DB)
-   *
-   * Designed for Docker / load balancer probes.
    */
-  fastify.get('/health', async (_req, reply) => {
-    const dbState = mongoose.connection.readyState; // 1 = connected
+  fastify.get('/health', {
+    schema: {
+      tags: ['Infrastructure'],
+      summary: 'Service health check',
+      description: 'Returns 200 when operational, 503 when degraded. Includes DB connectivity and processor liveness.',
+      response: {
+        200: healthResponseSchema,
+        503: healthResponseSchema,
+      },
+    },
+  }, async (_req, reply) => {
+    const dbState = mongoose.connection.readyState;
     const dbOk = dbState === 1;
 
     const body = {
       status: dbOk ? 'ok' : 'degraded',
       timestamp: new Date().toISOString(),
       db: dbOk ? 'connected' : 'disconnected',
-      indexer: {
-        lastRunAt: processorState.indexerLastRunAt,
-        lastError: processorState.indexerLastError,
-      },
-      matcher: {
-        lastRunAt: processorState.matcherLastRunAt,
-        lastError: processorState.matcherLastError,
-      },
+      indexer: processorState
+        ? { lastRunAt: processorState.indexerLastRunAt, lastError: processorState.indexerLastError }
+        : null,
+      matcher: processorState
+        ? { lastRunAt: processorState.matcherLastRunAt, lastError: processorState.matcherLastError }
+        : null,
     };
 
     return reply.status(dbOk ? 200 : 503).send(body);
@@ -81,23 +132,20 @@ export function buildServer(): FastifyInstance {
 
   /**
    * Prometheus metrics endpoint.
-   * Returns metrics in the Prometheus text exposition format for scraping.
    */
-  fastify.get('/metrics', async (_req, reply) => {
+  fastify.get('/metrics', {
+    schema: {
+      tags: ['Infrastructure'],
+      summary: 'Prometheus metrics',
+      description: 'Returns metrics in Prometheus text exposition format.',
+      response: {
+        200: { type: 'string', description: 'Prometheus text format' },
+      },
+    },
+  }, async (_req, reply) => {
     const metrics = await metricsRegistry.metrics();
     return reply.type(metricsRegistry.contentType).send(metrics);
   });
 
   return fastify;
-}
-
-let server: FastifyInstance | null = null;
-
-export async function startApiServer(): Promise<void> {
-  server = buildServer();
-  await server.listen({ port: config.apiPort, host: '0.0.0.0' });
-}
-
-export async function stopApiServer(): Promise<void> {
-  await server?.close();
 }

@@ -1,42 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-
-// ---------------------------------------------------------------------------
-// Module mocks — declared before any imports so vitest hoists them correctly
-// ---------------------------------------------------------------------------
-
-vi.mock('../repositories/transfer.repository', () => ({
-  transferRepository: {
-    claimForMatching: vi.fn(),
-    findUsedEvmHashes: vi.fn(),
-    markMatched: vi.fn(),
-    markRetried: vi.fn(),
-  },
-}));
-
-vi.mock('../services/hyperevm', () => ({
-  findErc20Transfers: vi.fn(),
-  findNativeTransfers: vi.fn(),
-}));
-
-vi.mock('../config', () => ({
-  config: {
-    maxRetries: 3,
-    retryDelayMs: 120_000,
-    evmSearchWindowMs: 600_000,
-  },
-}));
-
-vi.mock('../logger', () => ({
-  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), fatal: vi.fn() },
-}));
-
-vi.mock('../metrics', () => ({
-  matcherTransfersTotal: { inc: vi.fn() },
-}));
-
-import { runMatcher } from './matcher';
-import { transferRepository } from '../repositories/transfer.repository';
-import { findErc20Transfers, findNativeTransfers } from '../services/hyperevm';
+import { createMatcher, MatcherDeps } from './matcher';
+import type { HyperEvmService } from '../services/hyperevm';
+import type { TransferRepository } from '../repositories/transfer.repository';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -70,37 +35,66 @@ const MOCK_EVM_MATCH = {
   amount: 1_000_000_000_000_000_000n,
 };
 
+function createMockDeps(): MatcherDeps & {
+  evmService: { findErc20Transfers: ReturnType<typeof vi.fn>; findNativeTransfers: ReturnType<typeof vi.fn> };
+  transferRepository: {
+    claimForMatching: ReturnType<typeof vi.fn>;
+    findUsedEvmHashes: ReturnType<typeof vi.fn>;
+    markMatched: ReturnType<typeof vi.fn>;
+    markRetried: ReturnType<typeof vi.fn>;
+  };
+} {
+  return {
+    logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), fatal: vi.fn() } as any,
+    evmService: {
+      findErc20Transfers: vi.fn(),
+      findNativeTransfers: vi.fn(),
+    } as unknown as any,
+    transferRepository: {
+      claimForMatching: vi.fn(),
+      findUsedEvmHashes: vi.fn(),
+      markMatched: vi.fn(),
+      markRetried: vi.fn(),
+    } as unknown as any,
+    metrics: { matcherTransfersTotal: { inc: vi.fn() } } as any,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 describe('runMatcher', () => {
+  let deps: ReturnType<typeof createMockDeps>;
+  let matcher: ReturnType<typeof createMatcher>;
+
   beforeEach(() => {
-    vi.resetAllMocks();
-    vi.mocked(transferRepository.findUsedEvmHashes).mockResolvedValue(new Set());
-    vi.mocked(transferRepository.markMatched).mockResolvedValue();
-    vi.mocked(transferRepository.markRetried).mockResolvedValue();
+    deps = createMockDeps();
+    deps.transferRepository.findUsedEvmHashes.mockResolvedValue(new Set());
+    deps.transferRepository.markMatched.mockResolvedValue(undefined);
+    deps.transferRepository.markRetried.mockResolvedValue(undefined);
+    matcher = createMatcher(deps);
   });
 
   it('returns early without touching the DB when no eligible transfers exist', async () => {
-    vi.mocked(transferRepository.claimForMatching).mockResolvedValue([]);
+    deps.transferRepository.claimForMatching.mockResolvedValue([]);
 
-    await runMatcher();
+    await matcher.run();
 
-    expect(findErc20Transfers).not.toHaveBeenCalled();
-    expect(findNativeTransfers).not.toHaveBeenCalled();
-    expect(transferRepository.markMatched).not.toHaveBeenCalled();
+    expect(deps.evmService.findErc20Transfers).not.toHaveBeenCalled();
+    expect(deps.evmService.findNativeTransfers).not.toHaveBeenCalled();
+    expect(deps.transferRepository.markMatched).not.toHaveBeenCalled();
   });
 
   it('marks status=matched and stores EVM details when an ERC-20 transfer is found', async () => {
-    vi.mocked(transferRepository.claimForMatching).mockResolvedValue([makeRecord()] as never);
-    vi.mocked(findErc20Transfers).mockResolvedValue(MOCK_EVM_MATCH);
+    deps.transferRepository.claimForMatching.mockResolvedValue([makeRecord()]);
+    deps.evmService.findErc20Transfers.mockResolvedValue(MOCK_EVM_MATCH);
 
-    await runMatcher();
+    await matcher.run();
 
-    expect(findErc20Transfers).toHaveBeenCalledTimes(1);
-    expect(findNativeTransfers).not.toHaveBeenCalled();
-    expect(transferRepository.markMatched).toHaveBeenCalledWith(
+    expect(deps.evmService.findErc20Transfers).toHaveBeenCalledTimes(1);
+    expect(deps.evmService.findNativeTransfers).not.toHaveBeenCalled();
+    expect(deps.transferRepository.markMatched).toHaveBeenCalledWith(
       'mock-id-001',
       '0xevm-match-hash',
       new Date(1_700_000_000_000),
@@ -109,82 +103,79 @@ describe('runMatcher', () => {
   });
 
   it('routes to findNativeTransfers for HYPE (no evmTokenAddress)', async () => {
-    vi.mocked(transferRepository.claimForMatching).mockResolvedValue(
-      [makeRecord({ tokenSymbol: 'HYPE', evmTokenAddress: null })] as never,
+    deps.transferRepository.claimForMatching.mockResolvedValue(
+      [makeRecord({ tokenSymbol: 'HYPE', evmTokenAddress: null })],
     );
-    vi.mocked(findNativeTransfers).mockResolvedValue(MOCK_EVM_MATCH);
+    deps.evmService.findNativeTransfers.mockResolvedValue(MOCK_EVM_MATCH);
 
-    await runMatcher();
+    await matcher.run();
 
-    expect(findNativeTransfers).toHaveBeenCalledTimes(1);
-    expect(findErc20Transfers).not.toHaveBeenCalled();
+    expect(deps.evmService.findNativeTransfers).toHaveBeenCalledTimes(1);
+    expect(deps.evmService.findErc20Transfers).not.toHaveBeenCalled();
   });
 
   it('increments retryCount when no EVM match is found', async () => {
-    vi.mocked(transferRepository.claimForMatching).mockResolvedValue(
-      [makeRecord({ retryCount: 1 })] as never,
+    deps.transferRepository.claimForMatching.mockResolvedValue(
+      [makeRecord({ retryCount: 1 })],
     );
-    vi.mocked(findErc20Transfers).mockResolvedValue(null);
+    deps.evmService.findErc20Transfers.mockResolvedValue(null);
 
-    await runMatcher();
+    await matcher.run();
 
-    expect(transferRepository.markRetried).toHaveBeenCalledWith('mock-id-001', 1);
+    expect(deps.transferRepository.markRetried).toHaveBeenCalledWith('mock-id-001', 1);
   });
 
   it('calls markRetried when retryCount reaches maxRetries (exhaustion handled by repository)', async () => {
-    // retryCount is already at maxRetries - 1; the repository will mark it failed
-    vi.mocked(transferRepository.claimForMatching).mockResolvedValue(
-      [makeRecord({ retryCount: 2 })] as never,
+    deps.transferRepository.claimForMatching.mockResolvedValue(
+      [makeRecord({ retryCount: 2 })],
     );
-    vi.mocked(findErc20Transfers).mockResolvedValue(null);
+    deps.evmService.findErc20Transfers.mockResolvedValue(null);
 
-    await runMatcher();
+    await matcher.run();
 
-    expect(transferRepository.markRetried).toHaveBeenCalledWith('mock-id-001', 2);
+    expect(deps.transferRepository.markRetried).toHaveBeenCalledWith('mock-id-001', 2);
   });
 
   it('force-exhausts retries immediately when the HL amount cannot be parsed (NonRetriableError)', async () => {
-    vi.mocked(transferRepository.claimForMatching).mockResolvedValue(
-      [makeRecord({ amount: 'not-a-number', retryCount: 0 })] as never,
+    deps.transferRepository.claimForMatching.mockResolvedValue(
+      [makeRecord({ amount: 'not-a-number', retryCount: 0 })],
     );
 
-    await runMatcher();
+    await matcher.run();
 
-    expect(findErc20Transfers).not.toHaveBeenCalled();
-    expect(findNativeTransfers).not.toHaveBeenCalled();
-    // forceExhaust=true because NonRetriableError — bad amount will never parse
-    expect(transferRepository.markRetried).toHaveBeenCalledWith('mock-id-001', 0, true);
+    expect(deps.evmService.findErc20Transfers).not.toHaveBeenCalled();
+    expect(deps.evmService.findNativeTransfers).not.toHaveBeenCalled();
+    expect(deps.transferRepository.markRetried).toHaveBeenCalledWith('mock-id-001', 0, true);
   });
 
   it('retries normally when HyperEVM RPC throws (RetriableError)', async () => {
-    vi.mocked(transferRepository.claimForMatching).mockResolvedValue([makeRecord()] as never);
-    vi.mocked(findErc20Transfers).mockRejectedValue(new Error('connection timeout'));
+    deps.transferRepository.claimForMatching.mockResolvedValue([makeRecord()]);
+    deps.evmService.findErc20Transfers.mockRejectedValue(new Error('connection timeout'));
 
-    await runMatcher();
+    await matcher.run();
 
-    // forceExhaust=false — RPC failure is transient
-    expect(transferRepository.markRetried).toHaveBeenCalledWith('mock-id-001', 0, false);
+    expect(deps.transferRepository.markRetried).toHaveBeenCalledWith('mock-id-001', 0, false);
   });
 
   it('retries normally when DB exclusion-set query fails (RetriableError)', async () => {
-    vi.mocked(transferRepository.claimForMatching).mockResolvedValue([makeRecord()] as never);
-    vi.mocked(transferRepository.findUsedEvmHashes).mockRejectedValue(new Error('DB timeout'));
+    deps.transferRepository.claimForMatching.mockResolvedValue([makeRecord()]);
+    deps.transferRepository.findUsedEvmHashes.mockRejectedValue(new Error('DB timeout'));
 
-    await runMatcher();
+    await matcher.run();
 
-    expect(transferRepository.markRetried).toHaveBeenCalledWith('mock-id-001', 0, false);
+    expect(deps.transferRepository.markRetried).toHaveBeenCalledWith('mock-id-001', 0, false);
   });
 
   it('passes already-claimed EVM tx hashes as exclusion set to the search', async () => {
-    vi.mocked(transferRepository.claimForMatching).mockResolvedValue([makeRecord()] as never);
-    vi.mocked(transferRepository.findUsedEvmHashes).mockResolvedValue(
+    deps.transferRepository.claimForMatching.mockResolvedValue([makeRecord()]);
+    deps.transferRepository.findUsedEvmHashes.mockResolvedValue(
       new Set(['0xalready-claimed-hash']),
     );
-    vi.mocked(findErc20Transfers).mockResolvedValue(null);
+    deps.evmService.findErc20Transfers.mockResolvedValue(null);
 
-    await runMatcher();
+    await matcher.run();
 
-    const excludeSetArg = vi.mocked(findErc20Transfers).mock.calls[0][6] as Set<string>;
+    const excludeSetArg = deps.evmService.findErc20Transfers.mock.calls[0][6] as Set<string>;
     expect(excludeSetArg).toBeInstanceOf(Set);
     expect(excludeSetArg.has('0xalready-claimed-hash')).toBe(true);
   });

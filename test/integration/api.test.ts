@@ -7,32 +7,35 @@
 import 'reflect-metadata';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 
-// Mock the processor state (since we don't start the processor in API integration tests)
-vi.mock('../../src/processor', () => ({
-  processorState: {
+import { setupMongo, teardownMongo, clearCollections } from './setup';
+import { TransferModel } from '../../src/models/transfer.model';
+import { buildServer, ServerDeps } from '../../src/api/server';
+import type { FastifyInstance } from 'fastify';
+import type { ProcessorState } from '../../src/processor';
+import { Registry, collectDefaultMetrics } from 'prom-client';
+
+let app: FastifyInstance;
+
+function createTestDeps(): ServerDeps {
+  const processorState: ProcessorState = {
     indexerLastRunAt: null,
     indexerLastError: null,
     matcherLastRunAt: null,
     matcherLastError: null,
-  },
-}));
-vi.mock('../../src/metrics', () => ({
-  metricsRegistry: {
-    metrics: vi.fn().mockResolvedValue('# HELP fake\n'),
-    contentType: 'text/plain; version=0.0.4; charset=utf-8',
-  },
-}));
+  };
+  const registry = new Registry();
+  collectDefaultMetrics({ register: registry });
 
-import { setupMongo, teardownMongo, clearCollections } from './setup';
-import { TransferModel } from '../../src/models/transfer.model';
-import { buildServer } from '../../src/api/server';
-import type { FastifyInstance } from 'fastify';
-
-let app: FastifyInstance;
+  return {
+    config: { rateLimitMax: 0, rateLimitWindowMs: 60_000, apiPort: 3000 },
+    processorState,
+    metricsRegistry: registry,
+  };
+}
 
 beforeAll(async () => {
   await setupMongo();
-  app = buildServer();
+  app = buildServer(createTestDeps());
 }, 30_000);
 
 afterAll(async () => {

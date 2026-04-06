@@ -1,8 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
-
-// Prevent the module from trying to connect to the Hyperliquid API at import time
-vi.mock('./hl-client', () => ({ infoClient: {} }));
-
+import { describe, it, expect } from 'vitest';
 import { isBridgeSend } from './hyperliquid';
 
 // ---------------------------------------------------------------------------
@@ -32,7 +28,7 @@ describe('isBridgeSend', () => {
   it('returns true for a valid spot → spot bridge send', () => {
     expect(isBridgeSend(makeEntry())).toBe(true);
   });
-  //TODO: Should consider spot transfers as true as well and if destination is a system address it will result in bridging but not in scope of this project. should only track sendAsset entries.
+
   it('returns false for spotTransfer with token USDC (USDC bridge)', () => {
     expect(
       isBridgeSend({
